@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   FaChevronDown,
   FaChevronRight,
@@ -106,18 +106,16 @@ export default function TaskWorkflow({
     return [...task.steps].reverse().find((step) => step.status === 'failed') || null;
   }, [task]);
 
-  const failureMessage = useMemo(() => {
-    if (!task) return '';
-    const sections = [`Task failure context for ${task.user_message}`];
-    if (task.error) sections.push(`Task error:\n${task.error}`);
+
+  // Auto-expand the latest failed step so the recovery action is immediately visible.
+  useEffect(() => {
     if (latestFailedStep) {
-      sections.push(`Failed subtask: ${latestFailedStep.title}`);
-      if (latestFailedStep.command) sections.push(`Command:\n${latestFailedStep.command}`);
-      if (latestFailedStep.output) sections.push(`Output:\n${latestFailedStep.output}`);
-      if (latestFailedStep.error) sections.push(`Error:\n${latestFailedStep.error}`);
+      setExpandedSteps((prev) => {
+        if (prev.has(latestFailedStep.id)) return prev;
+        return new Set([...prev, latestFailedStep.id]);
+      });
     }
-    return sections.join('\n\n');
-  }, [latestFailedStep, task]);
+  }, [latestFailedStep?.id]);
 
   const toggleStep = (stepId: string) => {
     setExpandedSteps((prev) => {
@@ -126,6 +124,16 @@ export default function TaskWorkflow({
       else next.add(stepId);
       return next;
     });
+  };
+
+  const buildStepFailureMessage = (step: (typeof task.steps)[number]) => {
+    const sections = [`Task failure context for: ${task!.user_message}`];
+    sections.push(`Failed subtask: ${step.title}`);
+    if (step.command) sections.push(`Command:\n${step.command}`);
+    if (step.output) sections.push(`Output:\n${step.output}`);
+    if (step.error) sections.push(`Error:\n${step.error}`);
+    if (task!.error) sections.push(`Task-level error:\n${task!.error}`);
+    return sections.join('\n\n');
   };
 
   const getTraceIcon = (entryType: ReactTraceEntry['type']) => {
@@ -210,24 +218,6 @@ export default function TaskWorkflow({
           </div>
         )}
 
-        {(task.status === 'failed' || latestFailedStep) && onReplan && (
-          <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4">
-            <div className="text-sm font-medium text-red-900">Recovery</div>
-            <div className="mt-1 text-sm text-red-800">
-              Ask the LLM to generate the next subtask using the latest failure context.
-            </div>
-            <div className="mt-3">
-              <button
-                type="button"
-                onClick={() => onReplan(failureMessage)}
-                disabled={isReplanning || !failureMessage}
-                className="rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-              >
-                {isReplanning ? 'Generating fix step...' : 'Regenerate Next Fix Step'}
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 pb-0">
@@ -284,6 +274,19 @@ export default function TaskWorkflow({
                       <pre className="mt-1 bg-red-50 p-3 rounded-md text-sm text-red-700 overflow-x-auto font-mono whitespace-pre-wrap">
                         {step.error}
                       </pre>
+                    </div>
+                  )}
+                  {step.status === 'failed' && onReplan && (
+                    <div className="border-t border-red-100 pt-3 mt-1">
+                      <div className="text-xs font-medium text-red-700 mb-2">Recovery</div>
+                      <button
+                        type="button"
+                        onClick={() => onReplan(buildStepFailureMessage(step))}
+                        disabled={isReplanning}
+                        className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+                      >
+                        {isReplanning ? 'Generating fix step...' : 'Regenerate Next Fix Step'}
+                      </button>
                     </div>
                   )}
                 </div>
