@@ -33,6 +33,8 @@ pids
 *.pid.lock
 
 # Backend Python
+__pycache__/
+*.py[cod]
 backend/venv/
 backend/__pycache__/
 backend/**/__pycache__/
