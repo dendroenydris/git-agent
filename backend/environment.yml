@@ -1,0 +1,98 @@
+name: autodev-agent-backend
+channels:
+  - conda-forge
+  - defaults
+  - pytorch
+dependencies:
+  # Python version
+  - python=3.10
+  
+  # Core web framework dependencies
+  - fastapi=0.104.1
+  - uvicorn=0.24.0
+  - websockets=12.0
+  
+  # Task queue and caching
+  - redis-py=5.0.1
+  - celery=5.3.4
+  
+  # Data processing and scientific computing
+  - pandas=2.1.4
+  - numpy=1.25.2
+  - scipy=1.11.4
+  
+  # HTTP clients
+  - requests=2.31.0
+  - aiohttp=3.9.1
+  
+  # Environment and system utilities
+  - python-dotenv=1.0.0
+  - psutil=5.9.6
+  
+  # Development and testing
+  - pytest=7.4.3
+  - pytest-asyncio=0.21.1
+  - black=23.11.0
+  - flake8=6.1.0
+  
+  # Git integration
+  - gitpython=3.1.40
+  
+  # Document processing
+  - beautifulsoup4=4.12.2
+  
+  # Validation and serialization
+  - pydantic=2.5.2
+  - sqlalchemy
+  - psycopg
+  
+  # Optional: Docker and Kubernetes
+  - docker-py=6.1.3
+  
+  # Install via pip (packages not available in conda)
+  - pip
+  - pip:
+    # LangChain ecosystem
+    - langchain==0.1.0
+    - langchain-openai==0.0.2
+    - langchain-community==0.0.10
+    - langgraph==0.0.20
+    
+    # OpenAI
+    - openai==1.6.1
+    
+    # Vector databases and embeddings
+    - chromadb==0.4.18
+    - tiktoken==0.5.2
+    
+    # MCP (Model Context Protocol) - may need custom installation
+    # - mcp==0.1.0
+    # - langchain-mcp==0.1.0
+    
+    # GitHub integration
+    - PyGithub==2.1.1
+    
+    # Document processing (pip-only packages)
+    - python-docx==1.1.0
+    - pypdf2==3.0.1
+    - markdownify==0.11.6
+    
+    # HTTP clients (specific versions)
+    - httpx==0.25.2
+    - python-multipart==0.0.6
+    
+    # Logging and monitoring
+    - structlog==23.2.0
+    - prometheus-client==0.19.0
+    
+    # Kubernetes client
+    - kubernetes==28.1.0
+    
+    # Path utilities
+    - pathlib==1.0.1
+
+# Environment variables and post-install setup
+variables:
+  PYTHONPATH: .
+  LOG_LEVEL: INFO
+  REDIS_URL: redis://localhost:6379 

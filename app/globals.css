@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 0, 0, 0;
+  --background-rgb: 255, 255, 255;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: rgb(var(--background-rgb));
+  @apply antialiased;
+}
+
+/* Custom scrollbar styles */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* Custom component styles */
+@layer components {
+  .mac-button {
+    @apply px-3 py-1.5 rounded-md bg-white hover:bg-gray-50 
+           border border-mac-border shadow-mac transition-colors
+           focus:outline-none focus:ring-2 focus:ring-mac-hover focus:ring-opacity-50;
+  }
+
+  .panel-header {
+    @apply text-sm font-medium text-gray-700 px-4 py-2 border-b border-mac-border;
+  }
+
+  .chat-bubble {
+    @apply p-3 rounded-lg max-w-[85%] mb-2;
+  }
+
+  .user-bubble {
+    @apply chat-bubble bg-mac-hover text-white ml-auto;
+  }
+
+  .agent-bubble {
+    @apply chat-bubble bg-mac-gray text-gray-800;
+  }
+} 

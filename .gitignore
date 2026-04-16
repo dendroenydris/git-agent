@@ -1,0 +1,97 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# Testing
+/coverage
+
+# Next.js
+/.next/
+/out/
+
+# Production
+/build
+
+# Environment variables
+.env*.local
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Backend Python
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+backend/**/*.pyd
+backend/.Python
+backend/.pytest_cache/
+backend/.coverage
+backend/htmlcov/
+backend/dist/
+backend/build/
+backend/eggs/
+backend/parts/
+backend/var/
+backend/sdist/
+backend/develop-eggs/
+backend/.installed.cfg
+backend/lib/
+backend/lib64/
+backend/include/
+backend/share/
+
+# Conda environments
+envs/
+.conda/
+autodev-agent-backend/
+
+# Vector stores and temporary files
+backend/.data/
+backend/vectorstores/
+backend/temp/
+backend/tmp/
+
+# Keep scripts executable
+!backend/scripts/
+!scripts/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+logs
+*.log
+
+# Redis
+dump.rdb
+
+# Docker
