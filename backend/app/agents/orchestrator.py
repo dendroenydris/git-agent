@@ -24,6 +24,7 @@ from backend.app.agents.execution_facts import (
     should_mark_setup_complete,
 )
 from backend.app.agents.planner_context import (
+    build_context_budget_section,
     build_critical_previews_section,
     build_dialog_context,
     build_execution_history,
@@ -708,6 +709,11 @@ class AgentOrchestrator:
         execution_facts = format_execution_facts_section(task)
         historical_execution_facts = format_historical_execution_facts_section(state["historical_execution_facts"])
         latest_failure_note = latest_replan_failure_message(task)
+        context_budget = build_context_budget_section(
+            dialog_context=state["dialog_context"],
+            repository_context=state["repository_context"],
+            task=task,
+        )
         repository_summary = state["repository_context"].get("repository_summary", "")
         key_files_section = build_key_files_section(state["repository_context"])
         retrieved_section = build_retrieved_context_section(state["repository_context"])
@@ -745,6 +751,7 @@ class AgentOrchestrator:
                 (
                     "human",
                     "User request:\n{user_message}\n\n"
+                    "ContextBudget:\n{context_budget}\n\n"
                     "ReAct trace (Thought / Action / Observation history):\n{react_trace}\n\n"
                     "Recent dialog context:\n{dialog_context}\n\n"
                     "RepositorySummary:\n{repository_summary}\n\n"
@@ -763,6 +770,7 @@ class AgentOrchestrator:
             response = self.llm.invoke(
                 prompt.format_messages(
                     user_message=task.user_message,
+                    context_budget=context_budget,
                     react_trace=react_trace,
                     dialog_context=context_preview,
                     repository_summary=repository_summary,
