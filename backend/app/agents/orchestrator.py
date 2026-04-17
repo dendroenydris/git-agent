@@ -28,6 +28,7 @@ from backend.app.agents.planner_context import (
     build_dialog_context,
     build_execution_history,
     build_key_files_section,
+    build_react_trace_context,
     build_retrieved_context_section,
     parse_json_payload,
     sanitize_decision_payload,
@@ -113,6 +114,15 @@ class AgentOrchestrator:
         return self._run_agent_loop(state)
 
     def _run_agent_loop(self, state: AgentGraphState) -> AgentGraphState:
+        """Main ReAct loop: Thought → Action → Observation → Thought → …
+
+        Each iteration of the while-loop is one complete T-A-O cycle:
+          1. THOUGHT  – the LLM reasons about the goal and the latest observation,
+                        then plans exactly ONE next action.
+          2. ACTION   – that single action is executed by _execute_next_step.
+          3. OBSERVATION – the result is captured and appended to the ReAct trace,
+                        which the LLM will read on the next Thought.
+        """
         task = get_task(self.db, state["task_id"])
         if task is None:
             raise ValueError(f"Task {state['task_id']} not found")
@@ -135,14 +145,18 @@ class AgentOrchestrator:
             if refreshed:
                 self._emit_task_event(refreshed, "task_updated")
 
-        max_iterations = 8
+        # Each iteration is one T-A-O cycle; 20 cycles ≈ up to 20 individual actions.
+        max_iterations = 20
         while state["iteration_count"] < max_iterations:
             task = get_task(self.db, state["task_id"])
             if task is None:
                 raise ValueError(f"Task {state['task_id']} not found")
 
+            # ── ACTION + OBSERVATION ──────────────────────────────────────────
+            # If a planned action is waiting, execute exactly ONE step and
+            # capture its observation before returning to the Thought phase.
             if self._has_pending_steps(task):
-                state = self._execute_pending_steps(state, task)
+                state = self._execute_next_step(state, task)
                 if state["waiting_for_human"]:
                     return state
                 task = get_task(self.db, state["task_id"])
@@ -150,12 +164,15 @@ class AgentOrchestrator:
                     raise ValueError(f"Task {state['task_id']} not found")
                 if state["is_complete"] and not self._has_pending_steps(task):
                     break
-                if self._has_pending_steps(task):
-                    continue
+                # After every observation, fall through to the Thought phase
+                # so the LLM can reason about the result before the next action.
 
             if state["is_complete"]:
                 break
 
+            # ── THOUGHT ──────────────────────────────────────────────────────
+            # The LLM reads the full T-A-O trace and produces its next Thought
+            # together with exactly one Action to execute.
             decision = self._plan_next_actions(state, task)
             next_iteration = state["iteration_count"] + 1
             state["iteration_count"] = next_iteration
@@ -396,6 +413,208 @@ class AgentOrchestrator:
         state["waiting_for_human"] = False
         return state
 
+    def _execute_next_step(self, state: AgentGraphState, task) -> AgentGraphState:
+        """Execute exactly ONE pending step (Action phase of a single ReAct cycle).
+
+        Unlike _execute_pending_steps, this method processes only the first
+        pending step and returns immediately so the orchestrator loop can feed
+        the observation back to the LLM for the next Thought.
+        """
+        pending_steps = sorted(
+            (
+                step
+                for step in task.steps
+                if step.status in {StepStatus.PENDING, StepStatus.RUNNING, StepStatus.WAITING_FOR_HUMAN}
+            ),
+            key=lambda item: item.position,
+        )
+        if not pending_steps:
+            state["waiting_for_human"] = False
+            return state
+
+        db_step = pending_steps[0]
+        plan_step = self._step_from_db(db_step)
+
+        if self._requires_approval(plan_step) and task.approval_status != ApprovalStatus.APPROVED:
+            approval_message = "Waiting for operator approval before execution."
+            if plan_step.kind == "shell" and plan_step.command:
+                first_token = self._command_first_token(plan_step.command)
+                if first_token and first_token not in self.settings.command_allowlist:
+                    approval_message = (
+                        "Waiting for operator approval before execution. "
+                        f"Command prefix '{first_token}' is outside the normal allowlist and will run only after approval."
+                    )
+            update_step(
+                self.db,
+                task,
+                position=db_step.position,
+                status=StepStatus.WAITING_FOR_HUMAN,
+                output=approval_message,
+            )
+            merge_plan_state(
+                self.db,
+                task,
+                react_trace_entries=[
+                    build_observation_trace_entry(
+                        db_step=db_step,
+                        status="waiting_for_human",
+                        content=approval_message,
+                    )
+                ],
+            )
+            state["dialog_context"].append(f"agent_observation: {approval_message[:300]}")
+            set_task_status(
+                self.db,
+                task,
+                status=TaskStatus.WAITING_FOR_HUMAN,
+                approval_status=ApprovalStatus.PENDING,
+                summary=f"Approval required for step {db_step.position}: {plan_step.title}",
+                result={"results": state["results"]},
+            )
+            self.db.commit()
+            refreshed = get_task(self.db, task.id)
+            if refreshed:
+                self._emit_task_event(
+                    refreshed,
+                    "approval_required",
+                    {"step": db_step.position, "title": plan_step.title},
+                )
+            state["waiting_for_human"] = True
+            return state
+
+        update_step(self.db, task, position=db_step.position, status=StepStatus.RUNNING)
+        set_task_status(
+            self.db,
+            task,
+            status=TaskStatus.RUNNING,
+            approval_status=ApprovalStatus.APPROVED
+            if task.approval_status == ApprovalStatus.APPROVED
+            else ApprovalStatus.NOT_REQUIRED,
+            result={"results": state["results"]},
+        )
+        self.db.commit()
+        refreshed = get_task(self.db, task.id)
+        if refreshed:
+            self._emit_task_event(refreshed, "task_updated")
+
+        try:
+            result = self._execute_step(
+                plan_step=plan_step,
+                owner=state["owner"],
+                name=state["name"],
+                branch=state["branch"],
+            )
+        except Exception as exc:
+            logger.exception("Step execution raised an exception: %s", exc)
+            result = ToolResult(
+                step=plan_step.title,
+                success=False,
+                output="",
+                error=str(exc),
+                metadata={"exception_type": type(exc).__name__},
+            )
+        state["results"].append(result.model_dump())
+
+        if result.success:
+            update_step(
+                self.db,
+                task,
+                position=db_step.position,
+                status=StepStatus.COMPLETED,
+                output=result.output,
+                metadata=result.metadata,
+            )
+            merge_plan_state(
+                self.db,
+                task,
+                react_trace_entries=[
+                    build_observation_trace_entry(
+                        db_step=db_step,
+                        status="completed",
+                        content=result.output,
+                        error=result.error,
+                    )
+                ],
+            )
+            state["dialog_context"].append(f"agent_observation: {(result.output or '')[:300]}")
+            if self._requires_approval(plan_step):
+                set_task_status(
+                    self.db,
+                    task,
+                    status=TaskStatus.RUNNING,
+                    approval_status=ApprovalStatus.NOT_REQUIRED,
+                    result={"results": state["results"]},
+                )
+        else:
+            update_step(
+                self.db,
+                task,
+                position=db_step.position,
+                status=StepStatus.FAILED,
+                output=result.output,
+                error=result.error,
+                metadata=result.metadata,
+            )
+            merge_plan_state(
+                self.db,
+                task,
+                react_trace_entries=[
+                    build_observation_trace_entry(
+                        db_step=db_step,
+                        status="failed",
+                        content=result.output,
+                        error=result.error,
+                    )
+                ],
+            )
+            set_task_status(
+                self.db,
+                task,
+                status=TaskStatus.RUNNING,
+                approval_status=ApprovalStatus.NOT_REQUIRED,
+                summary=f"Step {db_step.position} failed: {plan_step.title}. Replanning next actions.",
+                error=result.error or "Execution failed",
+                result={"results": state["results"]},
+            )
+            failure_message = build_step_failure_message(
+                position=db_step.position,
+                title=plan_step.title,
+                command=plan_step.command,
+                output=result.output,
+                error=result.error,
+            )
+            agent_message = add_message(
+                self.db,
+                dialog_id=task.dialog_id,
+                content=failure_message,
+                message_type=MessageType.AGENT,
+                task_id=task.id,
+                summary="Step failed, replanning",
+                metadata={
+                    "step": db_step.position,
+                    "title": plan_step.title,
+                    "kind": plan_step.kind,
+                    "command": plan_step.command,
+                    "error": result.error,
+                },
+            )
+            state["dialog_context"].append(f"agent_observation: {failure_message[:300]}")
+            self.db.commit()
+            refreshed = get_task(self.db, task.id)
+            if refreshed:
+                self._emit_task_event(refreshed, "task_updated")
+            self._emit_message_event(task.dialog_id, agent_message.id, failure_message)
+            state["waiting_for_human"] = False
+            return state
+
+        self.db.commit()
+        refreshed = get_task(self.db, task.id)
+        if refreshed:
+            self._emit_task_event(refreshed, "task_updated")
+
+        state["waiting_for_human"] = False
+        return state
+
     def _summarize_task(self, state: AgentGraphState) -> AgentGraphState:
         task = get_task(self.db, state["task_id"])
         if task is None:
@@ -471,10 +690,18 @@ class AgentOrchestrator:
         return self._normalize_decision(decision, state, task)
 
     def _plan_next_actions_with_llm(self, state: AgentGraphState, task) -> PlannerDecisionModel | None:
+        """Thought phase of the ReAct loop.
+
+        The LLM receives the full Thought/Action/Observation trace built up so
+        far, reasons about it (the Thought), and returns exactly ONE next action
+        to execute.  Its reasoning field IS the Thought that will be appended to
+        the trace before the next Observation is captured.
+        """
         if self.llm is None:
             return None
 
         context_preview = "\n".join(state["dialog_context"][-8:]) if state["dialog_context"] else "No prior dialog context."
+        react_trace = build_react_trace_context(task)
         execution_history = build_execution_history(task)
         execution_facts = format_execution_facts_section(task)
         historical_execution_facts = format_historical_execution_facts_section(state["historical_execution_facts"])
@@ -487,30 +714,36 @@ class AgentOrchestrator:
             [
                 (
                     "system",
-                    "You are an autonomous DevOps agent planner. "
+                    "You are a ReAct (Reason + Act) autonomous DevOps agent. "
+                    "You operate in a strict Thought → Action → Observation loop. "
+                    "Each call to you is one Thought: you read all prior Observations, "
+                    "reason about what they mean for the goal, and decide exactly ONE next Action. "
+                    "The system will execute that action, capture the Observation, and call you again. "
                     "Return strict JSON only with keys: intent, reasoning, is_complete, completion_summary, steps. "
                     "intent keys: objective, category, complexity, needs_repository_context. "
                     "Each step keys: title, kind, command, image, parameters, requires_approval, success_criteria. "
                     "Allowed step kinds: shell, docker, github. "
                     "Rules: "
-                    "1) Plan only the next 1-3 executable steps. "
-                    "2) You may emit multiple steps when they are clearly sequential and still safe to execute. "
-                    "3) If the task is complete, set is_complete=true and return steps=[]. "
-                    "4) Do not emit pseudo-steps like plan, analyze, summarize, or explain as executable steps. "
-                    "5) Every step must be directly executable by the backend without extra natural language interpretation. "
-                    "6) Set requires_approval=true for every emitted step. "
-                    "7) Prefer inspection commands first when repository state is uncertain. "
-                    "8) Prefer these shell command prefixes when possible: ls, pwd, echo, cat, rg, sed, head, tail, git, python, python3, pip, pip3, pytest, npm, node, yarn, pnpm, bash, sh. "
-                    "9) Commands outside that preferred set are still allowed, but they will require explicit human approval before execution. "
-                    "10) Use the provided repository evidence sections and make sure planned steps are consistent with those facts. "
-                    "11) If the execution history contains failures, briefly reflect in reasoning: what failed, the likely cause (based on output/error), and propose the next recovery step(s) to move forward. Avoid repeating the same failing command unchanged. "
-                    "12) reasoning must be a short visible Thought for the UI: concise, task-specific, and action-guiding rather than generic. "
-                    "13) Never repeat environment/setup actions that already succeeded. If execution facts show conda was initialized, an environment was created, or requirements were installed successfully, do not plan those same setup actions again. Move to the next unmet objective or mark the task complete. "
-                    "14) If latest_replan_failure_message is provided, treat it as the operator-selected failure context that should drive the next recovery subtask.",
+                    "1) Plan EXACTLY 1 executable step per response — this is the ReAct single-action constraint. "
+                    "2) If the task is complete, set is_complete=true and return steps=[]. "
+                    "3) Do not emit pseudo-steps like plan, analyze, summarize, or explain as executable steps. "
+                    "4) Every step must be directly executable by the backend without extra natural language interpretation. "
+                    "5) Set requires_approval=true for every emitted step. "
+                    "6) Prefer inspection commands first when repository state is uncertain. "
+                    "7) Prefer these shell command prefixes when possible: ls, pwd, echo, cat, rg, sed, head, tail, git, python, python3, pip, pip3, pytest, npm, node, yarn, pnpm, bash, sh. "
+                    "8) Commands outside that preferred set are still allowed but require explicit human approval. "
+                    "9) Use the provided repository evidence and make sure the planned step is consistent with those facts. "
+                    "10) reasoning is your visible Thought for the UI: read the latest Observation in the ReAct trace, "
+                    "    reflect on what succeeded or failed, then explain in one or two sentences exactly what you will do next and why. "
+                    "11) Never repeat actions that already appear as completed Observations in the ReAct trace. "
+                    "    If all setup steps succeeded, move to the next unmet objective or mark the task complete. "
+                    "12) If latest_replan_failure_message is provided, treat it as the operator-selected failure context "
+                    "    that should drive the next recovery action.",
                 ),
                 (
                     "human",
                     "User request:\n{user_message}\n\n"
+                    "ReAct trace (Thought / Action / Observation history):\n{react_trace}\n\n"
                     "Recent dialog context:\n{dialog_context}\n\n"
                     "RepositorySummary:\n{repository_summary}\n\n"
                     "KeyFiles:\n{key_files}\n\n"
@@ -528,6 +761,7 @@ class AgentOrchestrator:
             response = self.llm.invoke(
                 prompt.format_messages(
                     user_message=task.user_message,
+                    react_trace=react_trace,
                     dialog_context=context_preview,
                     repository_summary=repository_summary,
                     key_files=key_files_section,

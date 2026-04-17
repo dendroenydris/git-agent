@@ -86,6 +86,29 @@ def build_retrieved_context_section(repository_context: dict[str, Any]) -> str:
     return "\n\n---\n\n".join(lines) if lines else "No retrieved chunks for this request."
 
 
+def build_react_trace_context(task: Any) -> str:
+    """Return a formatted Thought / Action / Observation history for the ReAct prompt."""
+    react_trace: list[dict[str, Any]] = (task.plan_json or {}).get("react_trace", [])
+    if not react_trace:
+        return "No prior ReAct trace — this is the first Thought."
+
+    lines: list[str] = []
+    for entry in react_trace[-18:]:
+        entry_type = entry.get("type", "")
+        label = entry.get("label", "?")
+        content = (entry.get("content") or "").strip()
+        if entry_type == "thought":
+            lines.append(f"Thought [{label}]: {content[:400]}")
+        elif entry_type == "act":
+            title = entry.get("title", "")
+            kind = entry.get("kind", "")
+            lines.append(f"Action  [{label}]: {title} ({kind}) → {content[:300]}")
+        elif entry_type == "observation":
+            status = entry.get("status", "")
+            lines.append(f"Obs     [{label}] ({status}): {content[:600]}")
+    return "\n".join(lines) if lines else "No prior ReAct trace."
+
+
 def build_critical_previews_section(repository_context: dict[str, Any]) -> str:
     previews = repository_context.get("critical_file_previews", [])
     if not isinstance(previews, list) or not previews:
