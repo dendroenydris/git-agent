@@ -34,6 +34,7 @@ export default function TaskWorkflow({
   isReplanning = false,
 }: TaskWorkflowProps) {
   const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
+  const [expandedTraceEntries, setExpandedTraceEntries] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState<PanelTab>('trace');
 
   const aggregatedOutput = useMemo(() => {
@@ -106,6 +107,11 @@ export default function TaskWorkflow({
     return [...task.steps].reverse().find((step) => step.status === 'failed') || null;
   }, [task]);
 
+  const latestRunningStep = useMemo(() => {
+    if (!task) return null;
+    return [...task.steps].reverse().find((step) => step.status === 'running') || null;
+  }, [task]);
+
 
   // Auto-expand the latest failed step so the recovery action is immediately visible.
   useEffect(() => {
@@ -115,13 +121,42 @@ export default function TaskWorkflow({
         return new Set([...prev, latestFailedStep.id]);
       });
     }
-  }, [latestFailedStep?.id]);
+  }, [latestFailedStep]);
+
+  useEffect(() => {
+    if (latestRunningStep) {
+      setExpandedSteps((prev) => {
+        if (prev.has(latestRunningStep.id)) return prev;
+        return new Set([...prev, latestRunningStep.id]);
+      });
+    }
+  }, [latestRunningStep]);
+
+  useEffect(() => {
+    setExpandedTraceEntries((prev) => {
+      const next = new Set(prev);
+      traceEntries.forEach((entry, index) => {
+        const traceKey = `${entry.label}-${index}`;
+        if (entry.type !== 'thought') next.add(traceKey);
+      });
+      return next;
+    });
+  }, [traceEntries]);
 
   const toggleStep = (stepId: string) => {
     setExpandedSteps((prev) => {
       const next = new Set(prev);
       if (next.has(stepId)) next.delete(stepId);
       else next.add(stepId);
+      return next;
+    });
+  };
+
+  const toggleTraceEntry = (traceKey: string) => {
+    setExpandedTraceEntries((prev) => {
+      const next = new Set(prev);
+      if (next.has(traceKey)) next.delete(traceKey);
+      else next.add(traceKey);
       return next;
     });
   };
@@ -327,27 +362,49 @@ export default function TaskWorkflow({
             traceEntries.length > 0 ? (
               <div className="space-y-3">
                 {traceEntries.map((entry, index) => (
-                  <div
-                    key={`${entry.label}-${index}`}
-                    className="rounded-lg border border-gray-800 bg-[#0f172a] p-3"
-                  >
-                    <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-400">
-                      {getTraceIcon(entry.type)}
-                      <span>{entry.label}</span>
-                      {entry.title && <span className="text-gray-500 normal-case">· {entry.title}</span>}
-                      {entry.status && (
-                        <span className="rounded bg-gray-800 px-2 py-0.5 text-[10px] normal-case text-gray-300">
-                          {entry.status}
-                        </span>
-                      )}
-                    </div>
-                    <pre className="mt-2 whitespace-pre-wrap text-gray-200">{entry.content}</pre>
-                    {entry.command && (
-                      <pre className="mt-2 whitespace-pre-wrap rounded bg-[#111827] p-2 text-blue-300">
-                        {entry.command}
-                      </pre>
-                    )}
-                  </div>
+                  (() => {
+                    const traceKey = `${entry.label}-${index}`;
+                    const isExpanded = expandedTraceEntries.has(traceKey);
+
+                    return (
+                      <div
+                        key={traceKey}
+                        className="rounded-lg border border-gray-800 bg-[#0f172a]"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => toggleTraceEntry(traceKey)}
+                          className="flex w-full items-center justify-between gap-3 p-3 text-left"
+                        >
+                          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-400">
+                            {getTraceIcon(entry.type)}
+                            <span>{entry.label}</span>
+                            {entry.title && <span className="text-gray-500 normal-case">· {entry.title}</span>}
+                            {entry.status && (
+                              <span className="rounded bg-gray-800 px-2 py-0.5 text-[10px] normal-case text-gray-300">
+                                {entry.status}
+                              </span>
+                            )}
+                          </div>
+                          {isExpanded ? (
+                            <FaChevronDown className="h-3.5 w-3.5 text-gray-500" />
+                          ) : (
+                            <FaChevronRight className="h-3.5 w-3.5 text-gray-500" />
+                          )}
+                        </button>
+                        {isExpanded && (
+                          <div className="border-t border-gray-800 px-3 py-3">
+                            <pre className="whitespace-pre-wrap text-gray-200">{entry.content}</pre>
+                            {entry.command && (
+                              <pre className="mt-2 whitespace-pre-wrap rounded bg-[#111827] p-2 text-blue-300">
+                                {entry.command}
+                              </pre>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()
                 ))}
               </div>
             ) : (

@@ -4,8 +4,9 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from redis import Redis
@@ -73,6 +74,14 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled exception for %s %s", request.method, request.url)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(exc) or "Internal server error"},
+        )
+
     @app.get("/", response_model=dict)
     def root() -> dict:
         return {"message": settings.app_name}
@@ -137,6 +146,9 @@ def create_app() -> FastAPI:
             return submit_dialog_chat(db, dialog_id=dialog_id, user_message=payload.message)
         except ValueError:
             raise HTTPException(status_code=404, detail="Dialog not found")
+        except Exception as exc:
+            logger.exception("Chat submission failed for dialog %s", dialog_id)
+            raise HTTPException(status_code=500, detail=str(exc) or "Chat submission failed")
 
     @app.get("/api/tasks", response_model=list[TaskRead])
     def list_tasks_endpoint(

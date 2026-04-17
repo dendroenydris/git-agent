@@ -12,6 +12,8 @@ import { useConsoleState } from './hooks/useConsoleState';
 import { useWebSocket } from './hooks/useWebSocket';
 import {
   ApprovalMode,
+  Task,
+  TaskEvent,
   approveTask,
   createDialog,
   getAppSettings,
@@ -22,6 +24,46 @@ import {
   submitChat,
   updateAppSettings,
 } from './lib/api';
+
+const applyStepOutputEvent = (tasks: Task[] | undefined, event: TaskEvent): Task[] | undefined => {
+  if (!tasks || event.type !== 'step_output' || !event.task_id) return tasks;
+
+  const stepId = typeof event.payload.step_id === 'string' ? event.payload.step_id : null;
+  const stepPosition =
+    typeof event.payload.step_position === 'number' ? event.payload.step_position : null;
+  const stream = event.payload.stream === 'stderr' ? 'stderr' : 'stdout';
+  const chunk = typeof event.payload.chunk === 'string' ? event.payload.chunk : '';
+  if (!chunk || (!stepId && stepPosition === null)) return tasks;
+
+  return tasks.map((task) => {
+    if (task.id !== event.task_id) return task;
+
+    return {
+      ...task,
+      status: task.status === 'queued' ? 'running' : task.status,
+      steps: task.steps.map((step) => {
+        const matchesStep =
+          (stepId !== null && step.id === stepId) ||
+          (stepPosition !== null && step.position === stepPosition);
+        if (!matchesStep) return step;
+
+        if (stream === 'stderr') {
+          return {
+            ...step,
+            status: step.status === 'pending' ? 'running' : step.status,
+            error: `${step.error ?? ''}${chunk}`,
+          };
+        }
+
+        return {
+          ...step,
+          status: step.status === 'pending' ? 'running' : step.status,
+          output: `${step.output ?? ''}${chunk}`,
+        };
+      }),
+    };
+  });
+};
 
 export default function Home() {
   const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(true);
@@ -51,22 +93,22 @@ export default function Home() {
     enabled: isBackendConnected,
   });
 
-  const tasksQuery = useQuery({
-    queryKey: ['tasks', currentDialogId],
-    queryFn: () => getTasks(currentDialogId),
-    enabled: Boolean(currentDialogId),
-    refetchInterval: 5000,
-  });
-
-  const dialogs = dialogsQuery.data || [];
-  const tasks = tasksQuery.data || [];
-
   const {
     isConnected: wsConnected,
     lastMessage,
     connectionError,
     reconnect,
   } = useWebSocket(currentDialogId);
+
+  const tasksQuery = useQuery({
+    queryKey: ['tasks', currentDialogId],
+    queryFn: () => getTasks(currentDialogId),
+    enabled: Boolean(currentDialogId),
+    refetchInterval: wsConnected ? false : 5000,
+  });
+
+  const dialogs = dialogsQuery.data || [];
+  const tasks = tasksQuery.data || [];
 
   const refreshDialogs = useCallback(() => {
     return queryClient.invalidateQueries({ queryKey: ['dialogs'] });
@@ -142,6 +184,13 @@ export default function Home() {
   useEffect(() => {
     if (!lastMessage) return;
 
+    if (lastMessage.type === 'step_output') {
+      queryClient.setQueryData<Task[] | undefined>(['tasks', currentDialogId], (currentTasks) =>
+        applyStepOutputEvent(currentTasks, lastMessage)
+      );
+      return;
+    }
+
     if (lastMessage.type === 'task_created' || lastMessage.type === 'task_updated' || lastMessage.type === 'approval_required') {
       refreshCurrentTasks();
     }
@@ -149,7 +198,7 @@ export default function Home() {
     if (lastMessage.type === 'message_added') {
       refreshDialogs();
     }
-  }, [lastMessage, refreshCurrentTasks, refreshDialogs]);
+  }, [currentDialogId, lastMessage, queryClient, refreshCurrentTasks, refreshDialogs]);
 
   const handleSendMessage = async (message: string) => {
     if (!currentDialogId) return;

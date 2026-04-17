@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
+
+
+OutputCallback = Callable[[str, str], None]
 
 
 @dataclass
@@ -12,6 +15,7 @@ class ExecutionRequest:
     environment: dict[str, str] = field(default_factory=dict)
     timeout_seconds: int = 900
     allow_unlisted_command: bool = False
+    on_output: OutputCallback | None = None
 
 
 @dataclass
@@ -29,5 +33,12 @@ class BaseExecutor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def run_docker(self, *, image: str, command: str | None, working_directory: str) -> ExecutionResult:
+    def run_docker(
+        self,
+        *,
+        image: str,
+        command: str | None,
+        working_directory: str,
+        on_output: OutputCallback | None = None,
+    ) -> ExecutionResult:
         raise NotImplementedError

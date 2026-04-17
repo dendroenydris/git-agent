@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 import shutil
 import tempfile
 from pathlib import Path
@@ -19,6 +20,9 @@ from sqlalchemy.orm import Session
 from backend.app.core.config import get_settings
 from backend.app.models.entities import Repository, RepositoryIndex
 from backend.app.services.dialogs import get_or_create_repository
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -143,11 +147,15 @@ class RepositoryIndexer:
         if not Path(index.vectorstore_path).exists():
             return []
 
-        vector_store = Chroma(
-            persist_directory=index.vectorstore_path,
-            embedding_function=self._embedding_model(),
-        )
-        return vector_store.similarity_search(query, k=6)
+        try:
+            vector_store = Chroma(
+                persist_directory=index.vectorstore_path,
+                embedding_function=self._embedding_model(),
+            )
+            return vector_store.similarity_search(query, k=6)
+        except Exception:
+            logger.exception("Repository search failed for index %s", index.id)
+            return []
 
     def format_context_blocks(
         self,
@@ -206,9 +214,9 @@ class RepositoryIndexer:
         }
 
     def _embedding_model(self):
-        if self.settings.openai_api_key:
+        if self.settings.has_usable_openai_api_key:
             return OpenAIEmbeddings(api_key=self.settings.openai_api_key)
-        return FakeEmbeddings(size=256)
+        return FakeEmbeddings(size=1536)
 
     def _clone_repository(self, *, owner: str, name: str, branch: str) -> str:
         destination = tempfile.mkdtemp(prefix=f"git_rag_{owner}_{name}_")

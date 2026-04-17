@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from langchain.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
@@ -7,6 +9,9 @@ from sqlalchemy.orm import Session
 from backend.app.core.config import get_settings
 from backend.app.models.entities import Dialog
 from backend.app.rag.indexer import RepositoryIndexer
+
+
+logger = logging.getLogger(__name__)
 
 
 def answer_with_repository_context(*, db: Session, dialog: Dialog, user_message: str) -> str:
@@ -24,7 +29,11 @@ def answer_with_repository_context(*, db: Session, dialog: Dialog, user_message:
 
     docs = []
     if snapshot.index.total_chunks > 0:
-        docs = indexer.search(snapshot.index, user_message)
+        try:
+            docs = indexer.search(snapshot.index, user_message)
+        except Exception:
+            logger.exception("Search answer retrieval failed for dialog %s", dialog.id)
+            docs = []
 
     context_blocks = indexer.format_context_blocks(
         docs,
@@ -45,33 +54,36 @@ def answer_with_repository_context(*, db: Session, dialog: Dialog, user_message:
         )
 
     settings = get_settings()
-    if settings.openai_api_key:
-        llm = ChatOpenAI(model=settings.openai_model, api_key=settings.openai_api_key, temperature=0.2)
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "Answer using only the repository excerpts below. "
-                    "If they are not enough, say what is missing. "
-                    "Be brief; name files or symbols when you can.",
-                ),
-                (
-                    "human",
-                    "Question:\n{question}\n\nRepository context:\n{context}",
-                ),
-            ]
-        )
-        response = llm.invoke(
-            prompt.format_messages(
-                question=user_message,
-                context="\n\n---\n\n".join(context_blocks),
+    if settings.has_usable_openai_api_key:
+        try:
+            llm = ChatOpenAI(model=settings.openai_model, api_key=settings.openai_api_key, temperature=0.2)
+            prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "Answer using only the repository excerpts below. "
+                        "If they are not enough, say what is missing. "
+                        "Be brief; name files or symbols when you can.",
+                    ),
+                    (
+                        "human",
+                        "Question:\n{question}\n\nRepository context:\n{context}",
+                    ),
+                ]
             )
-        )
-        return str(response.content)
+            response = llm.invoke(
+                prompt.format_messages(
+                    question=user_message,
+                    context="\n\n---\n\n".join(context_blocks),
+                )
+            )
+            return str(response.content)
+        except Exception:
+            logger.exception("LLM summary failed for dialog %s", dialog.id)
 
     preview = "\n\n".join(context_blocks[:3])
     return (
         "RAG retrieval is done. Closest excerpts:\n\n"
         f"{preview}\n\n"
-        "OPENAI_API_KEY is unset, so this is raw context instead of a model summary."
+        "OpenAI is unavailable, so this is raw repository context instead of a model summary."
     )

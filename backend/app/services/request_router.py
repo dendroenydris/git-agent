@@ -36,8 +36,11 @@ AUTOMATION_HINTS = {
 
 def decide_route_mode(message: str) -> RouteMode:
     settings = get_settings()
-    if settings.openai_api_key:
-        return _llm_decide_mode(message=message, model=settings.openai_model, api_key=settings.openai_api_key)
+    if settings.has_usable_openai_api_key:
+        try:
+            return _llm_decide_mode(message=message, model=settings.openai_model, api_key=settings.openai_api_key)
+        except Exception:
+            pass
     return _heuristic_decide_mode(message)
 
 

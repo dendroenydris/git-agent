@@ -81,7 +81,7 @@ class AgentOrchestrator:
                 model=self.settings.openai_model,
                 temperature=0.1,
             )
-            if self.settings.openai_api_key
+            if self.settings.has_usable_openai_api_key
             else None
         )
 
@@ -302,6 +302,7 @@ class AgentOrchestrator:
                     owner=state["owner"],
                     name=state["name"],
                     branch=state["branch"],
+                    on_output=self._build_step_output_callback(task, db_step),
                 )
             except Exception as exc:
                 logger.exception("Step execution raised an exception: %s", exc)
@@ -503,6 +504,7 @@ class AgentOrchestrator:
                 owner=state["owner"],
                 name=state["name"],
                 branch=state["branch"],
+                on_output=self._build_step_output_callback(task, db_step),
             )
         except Exception as exc:
             logger.exception("Step execution raised an exception: %s", exc)
@@ -933,10 +935,17 @@ class AgentOrchestrator:
         owner: str,
         name: str,
         branch: str,
+        on_output=None,
     ) -> ToolResult:
         if plan_step.kind == "shell":
             result = self.executor.execute(
-                request=self.executor_request(plan_step.command or "", owner, name, branch)
+                request=self.executor_request(
+                    plan_step.command or "",
+                    owner,
+                    name,
+                    branch,
+                    on_output=on_output,
+                )
             )
             return ToolResult(
                 step=plan_step.title,
@@ -951,6 +960,7 @@ class AgentOrchestrator:
                 image=plan_step.image or "python:3.10-slim",
                 command=plan_step.command,
                 working_directory=self._ensure_workspace(owner, name, branch),
+                on_output=on_output,
             )
             return ToolResult(
                 step=plan_step.title,
@@ -998,12 +1008,21 @@ class AgentOrchestrator:
 
         raise ValueError(f"Unsupported step kind: {plan_step.kind}")
 
-    def executor_request(self, command: str, owner: str, repository_name: str, branch: str):
+    def executor_request(
+        self,
+        command: str,
+        owner: str,
+        repository_name: str,
+        branch: str,
+        *,
+        on_output=None,
+    ):
         working_directory = self._ensure_workspace(owner, repository_name, branch)
         return self.executor_request_class(
             command,
             working_directory,
             allow_unlisted_command=True,
+            on_output=on_output,
         )
 
     @property
@@ -1097,6 +1116,27 @@ class AgentOrchestrator:
                 },
             )
         )
+
+    def _emit_step_output_event(self, task, db_step, *, stream: str, chunk: str) -> None:
+        publish_event(
+            TaskEvent(
+                type="step_output",
+                dialog_id=task.dialog_id,
+                task_id=task.id,
+                payload={
+                    "step_id": db_step.id,
+                    "step_position": db_step.position,
+                    "stream": stream,
+                    "chunk": chunk,
+                },
+            )
+        )
+
+    def _build_step_output_callback(self, task, db_step):
+        def _callback(stream: str, chunk: str) -> None:
+            self._emit_step_output_event(task, db_step, stream=stream, chunk=chunk)
+
+        return _callback
 
     def _has_pending_steps(self, task) -> bool:
         return any(step.status in {StepStatus.PENDING, StepStatus.RUNNING, StepStatus.WAITING_FOR_HUMAN} for step in task.steps)

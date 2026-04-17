@@ -77,6 +77,23 @@ class Settings(BaseModel):
     def is_development(self) -> bool:
         return self.environment == "development"
 
+    @property
+    def has_usable_openai_api_key(self) -> bool:
+        api_key = (self.openai_api_key or "").strip()
+        if not api_key:
+            return False
+
+        placeholder_values = {
+            "your_openai_api_key_here",
+            "sk-your-openai-api-key-here",
+            "replace_me",
+        }
+        if api_key in placeholder_values:
+            return False
+        if api_key.startswith("your_"):
+            return False
+        return True
+
 
 @lru_cache
 def get_settings() -> Settings:
