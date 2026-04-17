@@ -78,6 +78,8 @@ export default function TaskWorkflow({
           kind: typeof item.kind === 'string' ? item.kind : null,
           command: typeof item.command === 'string' ? item.command : null,
           status: typeof item.status === 'string' ? item.status : null,
+          created_at: typeof item.created_at === 'string' ? item.created_at : null,
+          content_truncated: item.content_truncated === true,
           content: item.content,
         } as ReactTraceEntry;
       })
@@ -380,9 +382,19 @@ export default function TaskWorkflow({
                             {getTraceIcon(entry.type)}
                             <span>{entry.label}</span>
                             {entry.title && <span className="text-gray-500 normal-case">· {entry.title}</span>}
+                            {typeof entry.step_position === 'number' && (
+                              <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] normal-case text-slate-300">
+                                step {entry.step_position}
+                              </span>
+                            )}
                             {entry.status && (
                               <span className="rounded bg-gray-800 px-2 py-0.5 text-[10px] normal-case text-gray-300">
                                 {entry.status}
+                              </span>
+                            )}
+                            {entry.content_truncated && (
+                              <span className="rounded bg-amber-900/40 px-2 py-0.5 text-[10px] normal-case text-amber-300">
+                                truncated
                               </span>
                             )}
                           </div>
@@ -394,6 +406,11 @@ export default function TaskWorkflow({
                         </button>
                         {isExpanded && (
                           <div className="border-t border-gray-800 px-3 py-3">
+                            {entry.created_at && (
+                              <div className="mb-2 text-xs text-gray-500">
+                                {new Date(entry.created_at).toLocaleString()}
+                              </div>
+                            )}
                             <pre className="whitespace-pre-wrap text-gray-200">{entry.content}</pre>
                             {entry.command && (
                               <pre className="mt-2 whitespace-pre-wrap rounded bg-[#111827] p-2 text-blue-300">

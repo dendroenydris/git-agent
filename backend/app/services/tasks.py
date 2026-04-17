@@ -145,6 +145,8 @@ def append_replan_request(db: Session, task: TaskRun, *, failure_message: str) -
             "step_position": None,
             "title": "Operator requested replanning",
             "status": "replan_requested",
+            "created_at": request_payload["created_at"],
+            "content_truncated": False,
             "content": failure_message,
         }
     )

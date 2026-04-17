@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 
@@ -52,6 +53,8 @@ def build_react_trace_entries(
             "type": "thought",
             "label": f"Thought {iteration}",
             "iteration": iteration,
+            "created_at": datetime.utcnow().isoformat(),
+            "content_truncated": False,
             "content": reasoning,
         }
     ]
@@ -65,6 +68,8 @@ def build_react_trace_entries(
                 "title": step_payload.get("title"),
                 "kind": step_payload.get("kind"),
                 "command": step_payload.get("command"),
+                "created_at": datetime.utcnow().isoformat(),
+                "content_truncated": False,
                 "content": format_act_trace_content(step_payload),
             }
         )
@@ -85,9 +90,14 @@ def build_observation_trace_entry(
     output_preview = (content or "").strip()
     error_preview = (error or "").strip()
     parts: list[str] = []
+    content_truncated = False
     if output_preview:
+        if len(output_preview) > 1200:
+            content_truncated = True
         parts.append(output_preview[:1200])
     if error_preview and error_preview not in output_preview:
+        if len(error_preview) > 800:
+            content_truncated = True
         parts.append(f"Error: {error_preview[:800]}")
     if not parts:
         parts.append(status)
@@ -98,6 +108,8 @@ def build_observation_trace_entry(
         "step_position": db_step.position,
         "title": db_step.title,
         "status": status,
+        "created_at": datetime.utcnow().isoformat(),
+        "content_truncated": content_truncated,
         "content": "\n".join(parts),
     }
 

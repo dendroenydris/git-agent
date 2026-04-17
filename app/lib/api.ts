@@ -71,6 +71,8 @@ export interface ReactTraceEntry {
   kind?: string | null;
   command?: string | null;
   status?: string | null;
+  created_at?: string | null;
+  content_truncated?: boolean;
   content: string;
 }
 
