@@ -44,7 +44,13 @@ def sanitize_decision_payload(payload: dict[str, Any], *, user_message: str) -> 
     payload["reasoning"] = str(payload.get("reasoning") or "Planner generated the next executable steps.")
     payload["is_complete"] = bool(payload.get("is_complete", False))
     payload["completion_summary"] = payload.get("completion_summary")
-    payload["steps"] = payload.get("steps") or []
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list):
+        raw_steps = []
+
+    # The ReAct loop executes one action per planning turn, so keep only
+    # the first executable step even if the model emits a longer plan.
+    payload["steps"] = [] if payload["is_complete"] else raw_steps[:1]
     return payload
 
 

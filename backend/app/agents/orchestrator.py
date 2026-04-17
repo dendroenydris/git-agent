@@ -899,6 +899,14 @@ class AgentOrchestrator:
             step.requires_approval = True
             safe_steps.append(step)
 
+        if len(safe_steps) > 1:
+            logger.warning(
+                "Planner returned %s steps for task %s; keeping only the first step to enforce the single-action ReAct loop.",
+                len(safe_steps),
+                task.id,
+            )
+            safe_steps = safe_steps[:1]
+
         if not safe_steps and not decision.is_complete:
             if should_mark_setup_complete(task, merged_execution_facts):
                 return PlannerDecisionModel(
