@@ -37,6 +37,9 @@ class Settings(BaseModel):
     execution_timeout_seconds: int = Field(
         default_factory=lambda: int(os.getenv("EXECUTION_TIMEOUT_SECONDS", "900"))
     )
+    graph_runner_enabled: bool = Field(
+        default_factory=lambda: os.getenv("GRAPH_RUNNER_ENABLED", "true").lower() == "true"
+    )
     command_allowlist: list[str] = Field(
         default_factory=lambda: [
             "python",

@@ -125,6 +125,88 @@ def merge_plan_state(
     return task
 
 
+def get_task_graph(task: TaskRun) -> dict[str, Any]:
+    plan_json = deepcopy(task.plan_json or {})
+    task_graph = deepcopy(plan_json.get("task_graph") or {})
+    task_graph.setdefault("nodes", [])
+    task_graph.setdefault("edges", [])
+    task_graph.setdefault("active_node_id", None)
+    task_graph.setdefault("worktree_path", None)
+    task_graph.setdefault("base_repo_path", None)
+    task_graph.setdefault("status", "pending")
+    return task_graph
+
+
+def set_task_graph(db: Session, task: TaskRun, *, task_graph: dict[str, Any]) -> TaskRun:
+    plan_json = deepcopy(task.plan_json or {})
+    normalized_graph = deepcopy(task_graph)
+    normalized_graph.setdefault("nodes", [])
+    normalized_graph.setdefault("edges", [])
+    normalized_graph.setdefault("active_node_id", None)
+    normalized_graph.setdefault("worktree_path", None)
+    normalized_graph.setdefault("base_repo_path", None)
+    normalized_graph.setdefault("status", "pending")
+    plan_json["task_graph"] = normalized_graph
+    task.plan_json = plan_json
+    db.add(task)
+    db.flush()
+    return task
+
+
+def initialize_task_graph(
+    db: Session,
+    task: TaskRun,
+    *,
+    nodes: list[dict[str, Any]],
+    active_node_id: str | None,
+    worktree_path: str | None,
+    base_repo_path: str | None,
+    edges: list[dict[str, Any]] | None = None,
+    status: str = "pending",
+) -> TaskRun:
+    return set_task_graph(
+        db,
+        task,
+        task_graph={
+            "nodes": deepcopy(nodes),
+            "edges": deepcopy(edges or []),
+            "active_node_id": active_node_id,
+            "worktree_path": worktree_path,
+            "base_repo_path": base_repo_path,
+            "status": status,
+        },
+    )
+
+
+def update_task_graph_node(db: Session, task: TaskRun, *, node_id: str, **fields: Any) -> TaskRun:
+    task_graph = get_task_graph(task)
+    updated_nodes: list[dict[str, Any]] = []
+    found = False
+    for node in task_graph["nodes"]:
+        if node.get("id") == node_id:
+            updated_nodes.append({**deepcopy(node), **deepcopy(fields)})
+            found = True
+        else:
+            updated_nodes.append(deepcopy(node))
+    if not found:
+        updated_nodes.append({"id": node_id, **deepcopy(fields)})
+    task_graph["nodes"] = updated_nodes
+    return set_task_graph(db, task, task_graph=task_graph)
+
+
+def set_task_graph_active_node(db: Session, task: TaskRun, *, node_id: str | None) -> TaskRun:
+    task_graph = get_task_graph(task)
+    task_graph["active_node_id"] = node_id
+    return set_task_graph(db, task, task_graph=task_graph)
+
+
+def update_task_graph_metadata(db: Session, task: TaskRun, **fields: Any) -> TaskRun:
+    task_graph = get_task_graph(task)
+    for key, value in fields.items():
+        task_graph[key] = deepcopy(value)
+    return set_task_graph(db, task, task_graph=task_graph)
+
+
 def append_replan_request(db: Session, task: TaskRun, *, failure_message: str) -> TaskRun:
     plan_json = deepcopy(task.plan_json or {})
     plan_json.setdefault("replan_requests", [])

@@ -90,6 +90,9 @@ export default function TaskWorkflow({
     typeof task?.plan_json.repository_context?.repository_summary === 'string'
       ? task.plan_json.repository_context.repository_summary
       : '';
+  const taskGraph = task?.plan_json.task_graph;
+  const graphNodes = Array.isArray(taskGraph?.nodes) ? taskGraph.nodes : [];
+  const worktreePath = typeof taskGraph?.worktree_path === 'string' ? taskGraph.worktree_path : null;
 
   const retrievedSources = useMemo(() => {
     const rawContext = task?.plan_json.repository_context?.retrieved_context;
@@ -441,6 +444,35 @@ export default function TaskWorkflow({
                   {task.summary || 'Summary will appear when the workflow completes.'}
                 </pre>
               </div>
+              {worktreePath && (
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-gray-400">Worktree</div>
+                  <pre className="mt-2 whitespace-pre-wrap text-gray-200">{worktreePath}</pre>
+                </div>
+              )}
+              {graphNodes.length > 0 && (
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-gray-400">Task Graph</div>
+                  <pre className="mt-2 whitespace-pre-wrap text-gray-200">
+                    {JSON.stringify(
+                      {
+                        status: taskGraph?.status || 'pending',
+                        active_node_id: taskGraph?.active_node_id || null,
+                        nodes: graphNodes.map((node) => ({
+                          id: node.id,
+                          agent: node.agent,
+                          title: node.title,
+                          status: node.status,
+                          depends_on: node.depends_on,
+                          tool_name: node.tool_name,
+                        })),
+                      },
+                      null,
+                      2
+                    )}
+                  </pre>
+                </div>
+              )}
             </div>
           )}
         </div>

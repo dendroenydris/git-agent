@@ -56,6 +56,7 @@ from backend.app.services.app_settings import get_or_create_app_settings
 from backend.app.services.dialogs import add_message, get_dialog
 from backend.app.services.event_bus import publish_event
 from backend.app.services.github_service import GitHubContext, GitHubService
+from backend.app.services.worktree_manager import WorktreeManager
 from backend.app.services.tasks import (
     append_plan_steps,
     get_task,
@@ -76,6 +77,7 @@ class AgentOrchestrator:
         self.indexer = RepositoryIndexer()
         self.executor = LocalExecutor()
         self.github_service = GitHubService()
+        self.worktree_manager = WorktreeManager()
         self.llm = (
             ChatOpenAI(
                 api_key=self.settings.openai_api_key,
@@ -303,6 +305,7 @@ class AgentOrchestrator:
                     owner=state["owner"],
                     name=state["name"],
                     branch=state["branch"],
+                    task_id=task.id,
                     on_output=self._build_step_output_callback(task, db_step),
                 )
             except Exception as exc:
@@ -505,6 +508,7 @@ class AgentOrchestrator:
                 owner=state["owner"],
                 name=state["name"],
                 branch=state["branch"],
+                task_id=task.id,
                 on_output=self._build_step_output_callback(task, db_step),
             )
         except Exception as exc:
@@ -951,6 +955,7 @@ class AgentOrchestrator:
         owner: str,
         name: str,
         branch: str,
+        task_id: str | None = None,
         on_output=None,
     ) -> ToolResult:
         if plan_step.kind == "shell":
@@ -960,6 +965,7 @@ class AgentOrchestrator:
                     owner,
                     name,
                     branch,
+                    task_id=task_id,
                     on_output=on_output,
                 )
             )
@@ -975,7 +981,7 @@ class AgentOrchestrator:
             result = self.executor.run_docker(
                 image=plan_step.image or "python:3.10-slim",
                 command=plan_step.command,
-                working_directory=self._ensure_workspace(owner, name, branch),
+                working_directory=self._ensure_workspace(owner, name, branch, task_id=task_id),
                 on_output=on_output,
             )
             return ToolResult(
@@ -1031,9 +1037,10 @@ class AgentOrchestrator:
         repository_name: str,
         branch: str,
         *,
+        task_id: str | None = None,
         on_output=None,
     ):
-        working_directory = self._ensure_workspace(owner, repository_name, branch)
+        working_directory = self._ensure_workspace(owner, repository_name, branch, task_id=task_id)
         return self.executor_request_class(
             command,
             working_directory,
@@ -1083,27 +1090,22 @@ class AgentOrchestrator:
         )
         return str(response.content)
 
-    def _ensure_workspace(self, owner: str, name: str, branch: str) -> str:
-        workspace_path = self.settings.repo_cache_dir / f"{owner}__{name}"
-        clone_url = f"https://github.com/{owner}/{name}.git"
-        if self.settings.github_token:
-            clone_url = f"https://{self.settings.github_token}:x-oauth-basic@github.com/{owner}/{name}.git"
+    def _ensure_workspace(self, owner: str, name: str, branch: str, *, task_id: str | None = None) -> str:
+        if task_id:
+            workspace = self.worktree_manager.ensure_task_worktree(
+                owner=owner,
+                name=name,
+                branch=branch,
+                task_id=task_id,
+            )
+            return workspace["worktree_path"]
 
-        if not workspace_path.exists():
-            try:
-                git.Repo.clone_from(clone_url, workspace_path.as_posix(), branch=branch, depth=1)
-            except git.exc.GitCommandError:
-                git.Repo.clone_from(clone_url, workspace_path.as_posix(), depth=1)
-            return workspace_path.as_posix()
-
-        try:
-            repository = git.Repo(workspace_path)
-            repository.git.fetch("origin", branch, depth=1)
-            repository.git.checkout(branch)
-            repository.git.pull("origin", branch)
-        except Exception as exc:
-            logger.warning("Failed to refresh repository workspace: %s", exc)
-        return workspace_path.as_posix()
+        workspace = self.worktree_manager.ensure_shared_workspace(
+            owner=owner,
+            name=name,
+            branch=branch,
+        )
+        return workspace["worktree_path"]
 
     def _emit_task_event(self, task, event_type: str, payload: dict[str, Any] | None = None) -> None:
         publish_event(

@@ -89,6 +89,14 @@ export interface Task {
     steps?: Array<Record<string, unknown>>;
     planner_iterations?: Array<Record<string, unknown>>;
     react_trace?: ReactTraceEntry[];
+    task_graph?: {
+      nodes?: Array<Record<string, unknown>>;
+      edges?: Array<Record<string, unknown>>;
+      active_node_id?: string | null;
+      worktree_path?: string | null;
+      base_repo_path?: string | null;
+      status?: string | null;
+    };
   };
   result_json: {
     results?: Array<{

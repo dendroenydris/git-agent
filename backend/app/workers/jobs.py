@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 
+from backend.app.agents.graph_runner import LangGraphRunner
 from backend.app.agents.orchestrator import AgentOrchestrator
+from backend.app.core.config import get_settings
 from backend.app.db.session import SessionLocal
 from backend.app.models.enums import ApprovalStatus, TaskStatus
 from backend.app.schemas import TaskEvent
@@ -12,14 +14,21 @@ from backend.app.workers.celery_app import celery_app
 
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 
 @celery_app.task(name="backend.app.workers.jobs.process_task")
 def process_task(task_id: str) -> dict:
     db = SessionLocal()
     try:
-        orchestrator = AgentOrchestrator(db)
-        result = orchestrator.process_task(task_id)
+        if settings.graph_runner_enabled:
+            try:
+                result = LangGraphRunner(db).process_task(task_id)
+            except Exception:
+                logger.exception("LangGraph runner failed for task %s; falling back to orchestrator", task_id)
+                result = AgentOrchestrator(db).process_task(task_id)
+        else:
+            result = AgentOrchestrator(db).process_task(task_id)
         db.commit()
         return result
     except Exception as exc:
