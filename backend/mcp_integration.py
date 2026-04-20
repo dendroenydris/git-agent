@@ -1,28 +1,9 @@
+from backend.app.services.tool_registry import list_tool_catalog
+
+
 class MCPToolManager:
     def __init__(self) -> None:
-        self.available_tools = [
-            {
-                "name": "shell.execute",
-                "server": "builtin",
-                "description": "Run an allowlisted shell command in the repository workspace",
-                "parameters": {"command": "string"},
-                "mock": False,
-            },
-            {
-                "name": "docker.run",
-                "server": "builtin",
-                "description": "Run a containerized command for verification",
-                "parameters": {"image": "string", "command": "string"},
-                "mock": False,
-            },
-            {
-                "name": "github.create_issue_comment",
-                "server": "builtin",
-                "description": "Create a GitHub comment with a PAT",
-                "parameters": {"issue_number": "int", "body": "string"},
-                "mock": False,
-            },
-        ]
+        self.available_tools = list_tool_catalog()
 
     async def get_available_tools(self):
         return self.available_tools

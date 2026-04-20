@@ -5,7 +5,7 @@ from typing import Any
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.tools import StructuredTool
 
-from backend.app.agents.orchestrator import AgentOrchestrator
+from backend.app.agents.runtime import AgentRuntime
 from backend.app.agents.types import ExecutionStepModel
 
 
@@ -29,14 +29,14 @@ class GitHubToolInput(BaseModel):
 class GraphToolbox:
     def __init__(
         self,
-        orchestrator: AgentOrchestrator,
+        runtime: AgentRuntime,
         *,
         owner: str,
         name: str,
         branch: str,
         task_id: str,
     ) -> None:
-        self.orchestrator = orchestrator
+        self.runtime = runtime
         self.owner = owner
         self.name = name
         self.branch = branch
@@ -68,7 +68,7 @@ class GraphToolbox:
         return self.tools[tool_name]
 
     def shell_execute(self, title: str, command: str) -> dict[str, Any]:
-        result = self.orchestrator._execute_step(
+        result = self.runtime.execute_step(
             plan_step=ExecutionStepModel(title=title, kind="shell", command=command),
             owner=self.owner,
             name=self.name,
@@ -78,7 +78,7 @@ class GraphToolbox:
         return result.model_dump()
 
     def docker_run(self, title: str, image: str = "python:3.10-slim", command: str | None = None) -> dict[str, Any]:
-        result = self.orchestrator._execute_step(
+        result = self.runtime.execute_step(
             plan_step=ExecutionStepModel(title=title, kind="docker", image=image, command=command),
             owner=self.owner,
             name=self.name,
@@ -88,7 +88,7 @@ class GraphToolbox:
         return result.model_dump()
 
     def github_action(self, title: str, action: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:
-        result = self.orchestrator._execute_step(
+        result = self.runtime.execute_step(
             plan_step=ExecutionStepModel(
                 title=title,
                 kind="github",

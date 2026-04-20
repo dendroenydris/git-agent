@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 from backend.app.agents.tools import GraphToolbox
 
 
@@ -11,11 +9,11 @@ class _FakeResult:
         return self._payload
 
 
-class _FakeOrchestrator:
+class _FakeRuntime:
     def __init__(self) -> None:
         self.calls = []
 
-    def _execute_step(self, *, plan_step, owner, name, branch, task_id, on_output=None):
+    def execute_step(self, *, plan_step, owner, name, branch, task_id, on_output=None):
         self.calls.append(
             {
                 "title": plan_step.title,
@@ -31,9 +29,9 @@ class _FakeOrchestrator:
 
 
 def test_graph_toolbox_shell_tool_uses_task_scoped_execution() -> None:
-    orchestrator = _FakeOrchestrator()
+    runtime = _FakeRuntime()
     toolbox = GraphToolbox(
-        orchestrator,
+        runtime,
         owner="acme",
         name="demo",
         branch="main",
@@ -43,6 +41,6 @@ def test_graph_toolbox_shell_tool_uses_task_scoped_execution() -> None:
     result = toolbox.get_tool("shell.execute").invoke({"title": "Inspect repo", "command": "ls -la"})
 
     assert result["success"] is True
-    assert orchestrator.calls[0]["kind"] == "shell"
-    assert orchestrator.calls[0]["task_id"] == "task_123"
+    assert runtime.calls[0]["kind"] == "shell"
+    assert runtime.calls[0]["task_id"] == "task_123"
 

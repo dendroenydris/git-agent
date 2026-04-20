@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { FaGithub, FaCodeBranch, FaTimes } from 'react-icons/fa';
 import { MdEdit } from 'react-icons/md';
-import type { Task, TaskStatus } from '../lib/api';
+import type { Task } from '../lib/api';
 import { formatWorkflowStatus, getTaskStatusBadgeClass, getWorkflowStatusIcon } from '../lib/task-status';
 
 interface LeftSidebarProps {
@@ -12,7 +12,6 @@ interface LeftSidebarProps {
   selectedTaskId: string;
   onTaskSelect: (taskId: string, dialogId?: string) => void;
   onRepoChange?: (newRepo: string) => void;
-  isConnected?: boolean;
 }
 
 export default function LeftSidebar({
@@ -23,7 +22,6 @@ export default function LeftSidebar({
   selectedTaskId,
   onTaskSelect,
   onRepoChange,
-  isConnected = false,
 }: LeftSidebarProps) {
   const [isRepoModalOpen, setIsRepoModalOpen] = useState(false);
   const [newRepoName, setNewRepoName] = useState('');

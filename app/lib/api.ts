@@ -158,7 +158,15 @@ export interface AppSettings {
 }
 
 export interface TaskEvent {
-  type: 'task_created' | 'task_updated' | 'message_added' | 'approval_required' | 'step_output' | 'error';
+  type:
+    | 'task_created'
+    | 'task_updated'
+    | 'message_added'
+    | 'approval_required'
+    | 'step_output'
+    | 'chat_accepted'
+    | 'chat_answer'
+    | 'error';
   dialog_id?: string;
   task_id?: string;
   message_id?: string;

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { FaPaperPlane, FaPlus, FaComment } from 'react-icons/fa';
 import ReactMarkdown from 'react-markdown';
 
-import type { Dialog, GitHubRepo } from '../lib/api';
+import type { Dialog } from '../lib/api';
 
 interface RightSidebarProps {
   isOpen: boolean;
@@ -12,7 +12,6 @@ interface RightSidebarProps {
   onNewDialog: () => void;
   onSelectDialog: (dialogId: string) => void;
   isConnected?: boolean;
-  currentRepo?: GitHubRepo;
 }
 
 export default function RightSidebar({
@@ -23,7 +22,6 @@ export default function RightSidebar({
   onNewDialog,
   onSelectDialog,
   isConnected = false,
-  currentRepo,
 }: RightSidebarProps) {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -42,7 +40,7 @@ export default function RightSidebar({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (input.trim()) {
+    if (input.trim() && isConnected) {
       onSendMessage(input.trim());
       setInput('');
     }
@@ -127,13 +125,14 @@ export default function RightSidebar({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Type your message..."
+            placeholder={isConnected ? 'Type your message...' : 'Connect to send a message'}
+            disabled={!isConnected}
             className="flex-1 resize-none rounded-lg border border-mac-border p-3 focus:outline-none focus:ring-2 focus:ring-mac-hover focus:ring-opacity-50 text-sm min-h-[80px]"
             rows={3}
           />
           <button
             type="submit"
-            disabled={!input.trim()}
+            disabled={!isConnected || !input.trim()}
             className="mac-button h-10 w-10 flex items-center justify-center disabled:opacity-50"
           >
             <FaPaperPlane className="w-4 h-4" />

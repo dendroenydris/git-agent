@@ -7,9 +7,10 @@ from typing import Any
 from langgraph.graph import StateGraph
 from sqlalchemy.orm import Session
 
+from backend.app.agents.execution_facts import build_historical_execution_facts
 from backend.app.agents.planner_context import build_dialog_context
 from backend.app.agents.graph_state import GraphAgentState
-from backend.app.agents.orchestrator import AgentOrchestrator
+from backend.app.agents.runtime import AgentRuntime
 from backend.app.agents.tools import GraphToolbox
 from backend.app.agents.types import ExecutionStepModel
 from backend.app.models.enums import ApprovalStatus, TaskStatus
@@ -35,8 +36,8 @@ logger = logging.getLogger(__name__)
 class LangGraphRunner:
     def __init__(self, db: Session) -> None:
         self.db = db
-        self.orchestrator = AgentOrchestrator(db)
-        self.worktree_manager = WorktreeManager()
+        self.runtime = AgentRuntime(db)
+        self.worktree_manager = self.runtime.worktree_manager
 
     def process_task(self, task_id: str) -> dict[str, Any]:
         task = get_task(self.db, task_id)
@@ -75,6 +76,7 @@ class LangGraphRunner:
             "user_message": task.user_message,
             "repository_context": repository_context,
             "dialog_context": build_dialog_context(dialog.messages),
+            "historical_execution_facts": build_historical_execution_facts(dialog, current_task_id=task.id),
             "task_graph": task_graph,
             "results": list((task.result_json or {}).get("results", [])),
             "completion_summary": task.summary or "",
@@ -102,7 +104,7 @@ class LangGraphRunner:
         )
 
         if not state["repository_context"]:
-            state["repository_context"] = self.orchestrator._build_repository_context(
+            state["repository_context"] = self.runtime.build_repository_context(
                 owner=state["owner"],
                 name=state["name"],
                 branch=state["branch"],
@@ -112,10 +114,13 @@ class LangGraphRunner:
         state["repository_context"]["worktree_path"] = workspace["worktree_path"]
         state["repository_context"]["base_repo_path"] = workspace["base_repo_path"]
 
-        decision = self.orchestrator._plan_next_actions_with_llm(state, task)
-        if decision is None:
-            decision = self.orchestrator._plan_next_actions_with_rules(state, task)
-        decision = self.orchestrator._normalize_decision(decision, state, task)
+        decision = self.runtime.plan_next_actions(
+            task=task,
+            user_message=state["user_message"],
+            dialog_context=state["dialog_context"],
+            repository_context=state["repository_context"],
+            historical_execution_facts=state["historical_execution_facts"],
+        )
 
         planner_node_id = f"planner-{task.id}"
         action_node_id = f"execute-{task.id}"
@@ -213,7 +218,7 @@ class LangGraphRunner:
         self.db.commit()
 
         tool_step = self._step_from_graph_node(execution_node)
-        if self.orchestrator._requires_approval(tool_step) and task.approval_status != ApprovalStatus.APPROVED:
+        if self.runtime.requires_approval(tool_step) and task.approval_status != ApprovalStatus.APPROVED:
             approval_message = f"Approval required before running graph node: {execution_node['title']}"
             update_task_graph_node(
                 self.db,
@@ -240,7 +245,7 @@ class LangGraphRunner:
             return state
 
         toolbox = GraphToolbox(
-            self.orchestrator,
+            self.runtime,
             owner=state["owner"],
             name=state["name"],
             branch=state["branch"],
@@ -295,9 +300,9 @@ class LangGraphRunner:
             return state
 
         has_failure = any(node.get("status") == "failed" for node in execution_nodes)
-        completion_summary = self.orchestrator._build_summary(
-            state["user_message"],
-            state["results"],
+        completion_summary = self.runtime.build_summary(
+            user_message=state["user_message"],
+            results=state["results"],
             completion_summary="Graph workflow completed." if not has_failure else "Graph workflow completed with failures.",
         )
         update_task_graph_node(
@@ -364,7 +369,7 @@ class LangGraphRunner:
                 "image": step.image or "python:3.10-slim",
                 "command": step.command,
             }
-        action = (step.parameters or {}).get("action") or self.orchestrator._infer_github_action(step) or "github_action"
+        action = (step.parameters or {}).get("action") or self.runtime.infer_github_action(step) or "github_action"
         parameters = dict(step.parameters or {})
         parameters.pop("action", None)
         return {"title": step.title, "action": action, "parameters": parameters}

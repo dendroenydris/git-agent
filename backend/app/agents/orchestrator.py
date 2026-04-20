@@ -1,62 +1,25 @@
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 import re
 from typing import Any
 
-import git
-
-from langchain.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
-from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from backend.app.agents.execution_facts import (
-    build_execution_facts,
-    build_historical_execution_facts,
-    format_execution_facts_section,
-    format_historical_execution_facts_section,
-    is_redundant_completed_step,
-    latest_replan_failure_message,
-    merge_execution_facts,
-    should_mark_setup_complete,
-)
-from backend.app.agents.planner_context import (
-    build_context_budget_section,
-    build_critical_previews_section,
-    build_dialog_context,
-    build_execution_history,
-    build_key_files_section,
-    build_react_trace_context,
-    build_retrieved_context_section,
-    parse_json_payload,
-    sanitize_decision_payload,
-)
+from backend.app.agents.execution_facts import build_historical_execution_facts
+from backend.app.agents.planner_context import build_dialog_context
+from backend.app.agents.runtime import AgentRuntime
 from backend.app.agents.task_trace import (
     build_observation_trace_entry,
     build_planned_step_payloads,
     build_react_trace_entries,
     build_step_failure_message,
 )
-from backend.app.agents.types import (
-    AgentGraphState,
-    ExecutionStepModel,
-    IntentAnalysis,
-    PlannerDecisionModel,
-    ToolResult,
-)
-from backend.app.core.config import get_settings
-from backend.app.executors.local import LocalExecutor
-from backend.app.models.enums import ApprovalMode, ApprovalStatus, MessageType, StepStatus, TaskStatus
-from backend.app.rag.indexer import RepositoryIndexer
+from backend.app.agents.types import AgentGraphState, ExecutionStepModel, PlannerDecisionModel, ToolResult
+from backend.app.models.enums import ApprovalStatus, MessageType, StepStatus, TaskStatus
 from backend.app.schemas import TaskEvent
-from backend.app.services.app_settings import get_or_create_app_settings
 from backend.app.services.dialogs import add_message, get_dialog
 from backend.app.services.event_bus import publish_event
-from backend.app.services.github_service import GitHubContext, GitHubService
-from backend.app.services.worktree_manager import WorktreeManager
 from backend.app.services.tasks import (
     append_plan_steps,
     get_task,
@@ -73,20 +36,8 @@ logger = logging.getLogger(__name__)
 class AgentOrchestrator:
     def __init__(self, db: Session) -> None:
         self.db = db
-        self.settings = get_settings()
-        self.indexer = RepositoryIndexer()
-        self.executor = LocalExecutor()
-        self.github_service = GitHubService()
-        self.worktree_manager = WorktreeManager()
-        self.llm = (
-            ChatOpenAI(
-                api_key=self.settings.openai_api_key,
-                model=self.settings.openai_model,
-                temperature=0.1,
-            )
-            if self.settings.has_usable_openai_api_key
-            else None
-        )
+        self.runtime = AgentRuntime(db)
+        self.settings = self.runtime.settings
 
     def process_task(self, task_id: str) -> dict[str, Any]:
         task = get_task(self.db, task_id)
@@ -662,290 +613,43 @@ class AgentOrchestrator:
         branch: str,
         user_message: str,
     ) -> dict[str, Any]:
-        base_context = self.indexer.build_planner_context(
-            self.db,
+        return self.runtime.build_repository_context(
             owner=owner,
             name=name,
             branch=branch,
-            query=user_message,
+            user_message=user_message,
         )
-        key_files = list(base_context.get("key_files", []))
-        extensions = set(base_context.get("extensions", []))
-        filenames = {Path(source).name for source in key_files}
-        lower_filenames = {name.lower() for name in filenames}
-        is_node = "package.json" in lower_filenames
-        is_python = "requirements.txt" in lower_filenames or ".py" in extensions
-        install_command = "npm install" if is_node else "pip install -r requirements.txt"
-        test_command = "npm test" if is_node else "pytest"
-        return {
-            "repository_summary": base_context.get("repository_summary", ""),
-            "install_command": install_command,
-            "test_command": test_command,
-            "stack": "node" if is_node else "python" if is_python else "generic",
-            "key_files": sorted(key_files)[:40],
-            "extensions": sorted(extensions)[:20],
-            "retrieved_context": base_context.get("retrieved_context", []),
-            "critical_file_previews": base_context.get("critical_file_previews", []),
-            "total_files": base_context.get("total_files", 0),
-            "total_chunks": base_context.get("total_chunks", 0),
-        }
 
     def _plan_next_actions(self, state: AgentGraphState, task) -> PlannerDecisionModel:
-        decision = self._plan_next_actions_with_llm(state, task)
-        if decision is None:
-            decision = self._plan_next_actions_with_rules(state, task)
-        return self._normalize_decision(decision, state, task)
-
-    def _plan_next_actions_with_llm(self, state: AgentGraphState, task) -> PlannerDecisionModel | None:
-        """Thought phase of the ReAct loop.
-
-        The LLM receives the full Thought/Action/Observation trace built up so
-        far, reasons about it (the Thought), and returns exactly ONE next action
-        to execute.  Its reasoning field IS the Thought that will be appended to
-        the trace before the next Observation is captured.
-        """
-        if self.llm is None:
-            return None
-
-        context_preview = "\n".join(state["dialog_context"][-8:]) if state["dialog_context"] else "No prior dialog context."
-        react_trace = build_react_trace_context(task)
-        execution_history = build_execution_history(task)
-        execution_facts = format_execution_facts_section(task)
-        historical_execution_facts = format_historical_execution_facts_section(state["historical_execution_facts"])
-        latest_failure_note = latest_replan_failure_message(task)
-        context_budget = build_context_budget_section(
+        return self.runtime.plan_next_actions(
+            task=task,
+            user_message=task.user_message,
             dialog_context=state["dialog_context"],
             repository_context=state["repository_context"],
-            task=task,
-        )
-        repository_summary = state["repository_context"].get("repository_summary", "")
-        key_files_section = build_key_files_section(state["repository_context"])
-        retrieved_section = build_retrieved_context_section(state["repository_context"])
-        preview_section = build_critical_previews_section(state["repository_context"])
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a ReAct (Reason + Act) autonomous DevOps agent. "
-                    "You operate in a strict Thought → Action → Observation loop. "
-                    "Each call to you is one Thought: you read all prior Observations, "
-                    "reason about what they mean for the goal, and decide exactly ONE next Action. "
-                    "The system will execute that action, capture the Observation, and call you again. "
-                    "Return strict JSON only with keys: intent, reasoning, is_complete, completion_summary, steps. "
-                    "intent keys: objective, category, complexity, needs_repository_context. "
-                    "Each step keys: title, kind, command, image, parameters, requires_approval, success_criteria. "
-                    "Allowed step kinds: shell, docker, github. "
-                    "Rules: "
-                    "1) Plan EXACTLY 1 executable step per response — this is the ReAct single-action constraint. "
-                    "2) If the task is complete, set is_complete=true and return steps=[]. "
-                    "3) Do not emit pseudo-steps like plan, analyze, summarize, or explain as executable steps. "
-                    "4) Every step must be directly executable by the backend without extra natural language interpretation. "
-                    "5) Set requires_approval=true for every emitted step. "
-                    "6) Prefer inspection commands first when repository state is uncertain. "
-                    "7) Prefer these shell command prefixes when possible: ls, pwd, echo, cat, rg, sed, head, tail, git, python, python3, pip, pip3, pytest, npm, node, yarn, pnpm, bash, sh. "
-                    "8) Commands outside that preferred set are still allowed but require explicit human approval. "
-                    "9) Use the provided repository evidence and make sure the planned step is consistent with those facts. "
-                    "10) reasoning is your visible Thought for the UI: read the latest Observation in the ReAct trace, "
-                    "    reflect on what succeeded or failed, then explain in one or two sentences exactly what you will do next and why. "
-                    "11) Never repeat actions that already appear as completed Observations in the ReAct trace. "
-                    "    If all setup steps succeeded, move to the next unmet objective or mark the task complete. "
-                    "12) If latest_replan_failure_message is provided, treat it as the operator-selected failure context "
-                    "    that should drive the next recovery action.",
-                ),
-                (
-                    "human",
-                    "User request:\n{user_message}\n\n"
-                    "ContextBudget:\n{context_budget}\n\n"
-                    "ReAct trace (Thought / Action / Observation history):\n{react_trace}\n\n"
-                    "Recent dialog context:\n{dialog_context}\n\n"
-                    "RepositorySummary:\n{repository_summary}\n\n"
-                    "KeyFiles:\n{key_files}\n\n"
-                    "RetrievedContext:\n{retrieved_context}\n\n"
-                    "CriticalFilePreviews:\n{critical_file_previews}\n\n"
-                    "Execution facts:\n{execution_facts}\n\n"
-                    "Historical execution facts from previous tasks in this dialog:\n{historical_execution_facts}\n\n"
-                    "Latest replan failure message:\n{latest_replan_failure_message}\n\n"
-                    "Execution history:\n{execution_history}",
-                ),
-            ]
+            historical_execution_facts=state["historical_execution_facts"],
         )
 
-        try:
-            response = self.llm.invoke(
-                prompt.format_messages(
-                    user_message=task.user_message,
-                    context_budget=context_budget,
-                    react_trace=react_trace,
-                    dialog_context=context_preview,
-                    repository_summary=repository_summary,
-                    key_files=key_files_section,
-                    retrieved_context=retrieved_section,
-                    critical_file_previews=preview_section,
-                    execution_facts=execution_facts,
-                    historical_execution_facts=historical_execution_facts,
-                    latest_replan_failure_message=latest_failure_note,
-                    execution_history=execution_history,
-                )
-            )
-            payload = parse_json_payload(str(response.content))
-            payload = sanitize_decision_payload(payload, user_message=task.user_message)
-            return PlannerDecisionModel.model_validate(payload)
-        except Exception as exc:
-            logger.warning("LLM planner failed, fallback to rule planner: %s", exc)
-            return None
+    def _plan_next_actions_with_llm(self, state: AgentGraphState, task) -> PlannerDecisionModel | None:
+        return self.runtime.plan_next_actions_with_llm(
+            task=task,
+            user_message=task.user_message,
+            dialog_context=state["dialog_context"],
+            repository_context=state["repository_context"],
+            historical_execution_facts=state["historical_execution_facts"],
+        )
 
     def _plan_next_actions_with_rules(self, state: AgentGraphState, task) -> PlannerDecisionModel:
-        user_message = task.user_message
-        repository_context = state["repository_context"]
-        lowered = user_message.lower()
-        intent = IntentAnalysis(
-            objective=user_message,
-            category="automation",
-            complexity="medium",
-            needs_repository_context=True,
-        )
-        executed_titles = {step.title for step in task.steps}
-        steps: list[ExecutionStepModel] = []
-
-        issue_match = re.search(r"(?:issue|pr|pull request)\s*#?(\d+)", lowered)
-        workflow_match = re.search(r"workflow\s+([a-zA-Z0-9_.-]+)", user_message)
-
-        if issue_match and "comment" in lowered and not executed_titles:
-            steps.append(
-                ExecutionStepModel(
-                    title=f"Post comment on issue #{issue_match.group(1)}",
-                    kind="github",
-                    parameters={
-                        "action": "create_issue_comment",
-                        "issue_number": int(issue_match.group(1)),
-                        "body": f"Automated message from AI DevOps Copilot:\n\n{user_message}",
-                    },
-                    success_criteria="A GitHub issue comment is created successfully.",
-                )
-            )
-            intent.category = "github_comment"
-        elif "workflow" in lowered and ("trigger" in lowered or "dispatch" in lowered) and not executed_titles:
-            steps.append(
-                ExecutionStepModel(
-                    title="Trigger GitHub Actions workflow",
-                    kind="github",
-                    parameters={
-                        "action": "dispatch_workflow",
-                        "workflow_id": workflow_match.group(1) if workflow_match else "ci.yml",
-                    },
-                    success_criteria="The workflow dispatch API accepts the workflow run.",
-                )
-            )
-            intent.category = "github_actions"
-        else:
-            install_command = repository_context["install_command"]
-            test_command = repository_context["test_command"]
-
-            if any(token in lowered for token in ["install", "setup", "environment", "dependencies"]) and "Install dependencies" not in executed_titles:
-                steps.append(
-                    ExecutionStepModel(
-                        title="Install dependencies",
-                        kind="shell",
-                        command=install_command,
-                        success_criteria="Dependencies install without command failure.",
-                    )
-                )
-
-            if any(token in lowered for token in ["test", "pytest", "unit test", "run tests"]) and "Run tests and capture failure points" not in executed_titles:
-                steps.append(
-                    ExecutionStepModel(
-                        title="Run tests and capture failure points",
-                        kind="shell",
-                        command=test_command,
-                        success_criteria="The test command runs and returns actionable output.",
-                    )
-                )
-
-            if ("docker" in lowered or "container" in lowered) and "Run containerized validation command" not in executed_titles:
-                steps.append(
-                    ExecutionStepModel(
-                        title="Run containerized validation command",
-                        kind="docker",
-                        image="python:3.10-slim"
-                        if repository_context["stack"] == "python"
-                        else "node:20-alpine",
-                        command=test_command,
-                        success_criteria="The command executes successfully inside the container.",
-                    )
-                )
-
-            if not steps and "Inspect repository workspace" not in executed_titles:
-                steps.append(
-                    ExecutionStepModel(
-                        title="Inspect repository workspace",
-                        kind="shell",
-                        command="ls -la",
-                        success_criteria="Workspace contents are listed for further planning.",
-                    )
-                )
-
-        return PlannerDecisionModel(
-            intent=intent,
-            reasoning="Rule-based fallback planner generated the next executable steps.",
-            is_complete=bool(task.steps) and not steps,
-            completion_summary="Rule planner determined there are no more safe executable steps."
-            if bool(task.steps) and not steps
-            else None,
-            steps=steps,
+        return self.runtime.plan_next_actions_with_rules(
+            task=task,
+            user_message=task.user_message,
+            repository_context=state["repository_context"],
         )
 
     def _normalize_decision(self, decision: PlannerDecisionModel, state: AgentGraphState, task) -> PlannerDecisionModel:
-        execution_facts = build_execution_facts(task)
-        historical_execution_facts = state["historical_execution_facts"]
-        merged_execution_facts = merge_execution_facts(execution_facts, historical_execution_facts)
-        completed_signatures = set(merged_execution_facts["completed_signatures"])
-        safe_steps: list[ExecutionStepModel] = []
-        for raw_step in decision.steps:
-            try:
-                step = ExecutionStepModel.model_validate(raw_step)
-            except ValidationError:
-                continue
-
-            if is_redundant_completed_step(step, completed_signatures):
-                continue
-            step.requires_approval = True
-            safe_steps.append(step)
-
-        if len(safe_steps) > 1:
-            logger.warning(
-                "Planner returned %s steps for task %s; keeping only the first step to enforce the single-action ReAct loop.",
-                len(safe_steps),
-                task.id,
-            )
-            safe_steps = safe_steps[:1]
-
-        if not safe_steps and not decision.is_complete:
-            if should_mark_setup_complete(task, merged_execution_facts):
-                return PlannerDecisionModel(
-                    intent=decision.intent,
-                    reasoning=decision.reasoning,
-                    is_complete=True,
-                    completion_summary=(
-                        decision.completion_summary
-                        or "Environment setup steps already completed successfully; no further setup action is needed."
-                    ),
-                    steps=[],
-                )
-            safe_steps = [
-                ExecutionStepModel(
-                    title="Inspect repository workspace",
-                    kind="shell",
-                    command="ls -la",
-                    success_criteria="Workspace contents are listed for further planning.",
-                )
-            ]
-
-        return PlannerDecisionModel(
-            intent=decision.intent,
-            reasoning=decision.reasoning,
-            is_complete=decision.is_complete and not safe_steps,
-            completion_summary=decision.completion_summary,
-            steps=safe_steps,
+        return self.runtime.normalize_decision(
+            decision=decision,
+            task=task,
+            historical_execution_facts=state["historical_execution_facts"],
         )
 
     def _execute_step(
@@ -958,77 +662,14 @@ class AgentOrchestrator:
         task_id: str | None = None,
         on_output=None,
     ) -> ToolResult:
-        if plan_step.kind == "shell":
-            result = self.executor.execute(
-                request=self.executor_request(
-                    plan_step.command or "",
-                    owner,
-                    name,
-                    branch,
-                    task_id=task_id,
-                    on_output=on_output,
-                )
-            )
-            return ToolResult(
-                step=plan_step.title,
-                success=result.success,
-                output=result.stdout or result.stderr,
-                error=result.stderr if not result.success else None,
-                metadata=result.metadata,
-            )
-
-        if plan_step.kind == "docker":
-            result = self.executor.run_docker(
-                image=plan_step.image or "python:3.10-slim",
-                command=plan_step.command,
-                working_directory=self._ensure_workspace(owner, name, branch, task_id=task_id),
-                on_output=on_output,
-            )
-            return ToolResult(
-                step=plan_step.title,
-                success=result.success,
-                output=result.stdout or result.stderr,
-                error=result.stderr if not result.success else None,
-                metadata=result.metadata,
-            )
-
-        if plan_step.kind == "github":
-            context = GitHubContext(owner=owner, name=name, branch=branch)
-            action = plan_step.parameters.get("action")
-            if action is None:
-                action = self._infer_github_action(plan_step)
-            if action == "create_issue_comment":
-                body = plan_step.parameters.get("body") or plan_step.parameters.get("comment_body") or plan_step.command
-                response = self.github_service.create_issue_comment(
-                    context,
-                    issue_number=plan_step.parameters["issue_number"],
-                    body=body,
-                )
-            elif action == "dispatch_workflow":
-                response = self.github_service.dispatch_workflow(
-                    context,
-                    workflow_id=plan_step.parameters["workflow_id"],
-                    ref=branch,
-                )
-            elif action == "create_pull_request":
-                response = self.github_service.create_pull_request(
-                    context,
-                    title=plan_step.parameters["title"],
-                    body=plan_step.parameters["body"],
-                    head=plan_step.parameters["head"],
-                    base=plan_step.parameters.get("base", branch),
-                )
-            else:
-                raise ValueError(f"Unsupported GitHub action: {action}")
-
-            return ToolResult(
-                step=plan_step.title,
-                success=True,
-                output=json.dumps(response, indent=2),
-                metadata=response,
-            )
-
-        raise ValueError(f"Unsupported step kind: {plan_step.kind}")
+        return self.runtime.execute_step(
+            plan_step=plan_step,
+            owner=owner,
+            name=name,
+            branch=branch,
+            task_id=task_id,
+            on_output=on_output,
+        )
 
     def executor_request(
         self,
@@ -1040,19 +681,18 @@ class AgentOrchestrator:
         task_id: str | None = None,
         on_output=None,
     ):
-        working_directory = self._ensure_workspace(owner, repository_name, branch, task_id=task_id)
-        return self.executor_request_class(
-            command,
-            working_directory,
-            allow_unlisted_command=True,
+        return self.runtime.executor_request(
+            command=command,
+            owner=owner,
+            repository_name=repository_name,
+            branch=branch,
+            task_id=task_id,
             on_output=on_output,
         )
 
     @property
     def executor_request_class(self):
-        from backend.app.executors.base import ExecutionRequest
-
-        return ExecutionRequest
+        return self.runtime.executor_request_class
 
     def _build_summary(
         self,
@@ -1060,52 +700,14 @@ class AgentOrchestrator:
         results: list[dict[str, Any]],
         completion_summary: str | None = None,
     ) -> str:
-        if self.llm is None:
-            lines = [f"Request: {user_message}", "", "Workflow results:"]
-            for result in results:
-                prefix = "OK" if result["success"] else "FAILED"
-                lines.append(f"- [{prefix}] {result['step']}: {result['output'][:240]}")
-            if completion_summary:
-                lines.extend(["", f"Completion signal: {completion_summary}"])
-            return "\n".join(lines)
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You summarize DevOps automation runs for humans. Be concise and technical.",
-                ),
-                (
-                    "human",
-                    "User request: {user_message}\n\nCompletion signal: {completion_summary}\n\nExecution results:\n{results}",
-                ),
-            ]
+        return self.runtime.build_summary(
+            user_message=user_message,
+            results=results,
+            completion_summary=completion_summary,
         )
-        response = self.llm.invoke(
-            prompt.format_messages(
-                user_message=user_message,
-                completion_summary=completion_summary or "No explicit completion signal provided.",
-                results=json.dumps(results, indent=2),
-            )
-        )
-        return str(response.content)
 
     def _ensure_workspace(self, owner: str, name: str, branch: str, *, task_id: str | None = None) -> str:
-        if task_id:
-            workspace = self.worktree_manager.ensure_task_worktree(
-                owner=owner,
-                name=name,
-                branch=branch,
-                task_id=task_id,
-            )
-            return workspace["worktree_path"]
-
-        workspace = self.worktree_manager.ensure_shared_workspace(
-            owner=owner,
-            name=name,
-            branch=branch,
-        )
-        return workspace["worktree_path"]
+        return self.runtime.ensure_workspace(owner, name, branch, task_id=task_id)
 
     def _emit_task_event(self, task, event_type: str, payload: dict[str, Any] | None = None) -> None:
         publish_event(
@@ -1168,35 +770,10 @@ class AgentOrchestrator:
         return ExecutionStepModel.model_validate(payload)
 
     def _command_first_token(self, command: str) -> str | None:
-        try:
-            return re.split(r"\s+", command.strip(), maxsplit=1)[0] or None
-        except Exception:
-            return None
+        return self.runtime.command_first_token(command)
 
     def _infer_github_action(self, step: ExecutionStepModel) -> str | None:
-        parameters = step.parameters or {}
-        if "issue_number" in parameters and (
-            "body" in parameters or "comment_body" in parameters or step.command
-        ):
-            return "create_issue_comment"
-        if "workflow_id" in parameters:
-            return "dispatch_workflow"
-        if {"title", "body", "head"}.issubset(parameters.keys()):
-            return "create_pull_request"
-        return None
+        return self.runtime.infer_github_action(step)
 
     def _requires_approval(self, step: ExecutionStepModel) -> bool:
-        approval_mode = get_or_create_app_settings(self.db).approval_mode
-        if approval_mode == ApprovalMode.ALL_ALLOW:
-            return False
-        if approval_mode == ApprovalMode.NO:
-            return True
-        if step.kind == "github":
-            return True
-        if step.kind == "shell":
-            first_token = self._command_first_token(step.command or "")
-            return bool(first_token and first_token not in self.settings.command_allowlist)
-        if step.kind == "docker":
-            first_token = self._command_first_token(step.command or "")
-            return bool(first_token and first_token not in self.settings.command_allowlist)
-        return True
+        return self.runtime.requires_approval(step)

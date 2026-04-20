@@ -11,6 +11,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "vitest run",
     "check": "chmod +x scripts/check-prerequisites.sh && ./scripts/check-prerequisites.sh",
     "conda:setup": "chmod +x scripts/setup-conda.sh && ./scripts/setup-conda.sh",
     "backend:setup": "npm run conda:setup",
@@ -51,6 +52,7 @@
     "eslint-config-next": "14.1.0",
     "postcss": "^8.4.33",
     "tailwindcss": "^3.4.1",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.4"
   }
 }

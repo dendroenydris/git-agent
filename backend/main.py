@@ -1,3 +1,5 @@
+"""Compatibility entrypoint that re-exports the canonical FastAPI app."""
+
 import uvicorn
 
 from backend.app.main import app, create_app

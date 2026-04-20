@@ -27,6 +27,7 @@ class GraphAgentState(TypedDict):
     user_message: str
     repository_context: dict[str, Any]
     dialog_context: list[str]
+    historical_execution_facts: dict[str, Any]
     task_graph: dict[str, Any]
     results: list[dict[str, Any]]
     completion_summary: str
