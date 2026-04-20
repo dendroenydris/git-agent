@@ -78,17 +78,32 @@ class AgentRuntime:
         )
         key_files = list(base_context.get("key_files", []))
         extensions = set(base_context.get("extensions", []))
+        lower_paths = [str(source).lower() for source in key_files]
         filenames = {Path(source).name for source in key_files}
         lower_filenames = {filename.lower() for filename in filenames}
+        context_text = self._build_repository_signal_text(base_context)
         is_node = "package.json" in lower_filenames
-        is_python = "requirements.txt" in lower_filenames or ".py" in extensions
-        install_command = "npm install" if is_node else "pip install -r requirements.txt"
-        test_command = "npm test" if is_node else "pytest"
+        is_python = bool(
+            {"requirements.txt", "environment.yml", "environment.yaml", "pyproject.toml", "pipfile"} & lower_filenames
+        ) or ".py" in extensions
+        stack = "polyglot" if is_node and is_python else "node" if is_node else "python" if is_python else "generic"
+        environment_strategy = self._detect_environment_strategy(
+            user_message=user_message,
+            lower_paths=lower_paths,
+            lower_filenames=lower_filenames,
+            context_text=context_text,
+            stack=stack,
+        )
         return {
             "repository_summary": base_context.get("repository_summary", ""),
-            "install_command": install_command,
-            "test_command": test_command,
-            "stack": "node" if is_node else "python" if is_python else "generic",
+            "install_command": environment_strategy["install_command"],
+            "test_command": environment_strategy["test_command"],
+            "stack": stack,
+            "runtime_focus": environment_strategy["runtime_focus"],
+            "environment_manager": environment_strategy["environment_manager"],
+            "environment_reason": environment_strategy["environment_reason"],
+            "environment_name": environment_strategy["environment_name"],
+            "environment_file": environment_strategy["environment_file"],
             "key_files": sorted(key_files)[:40],
             "extensions": sorted(extensions)[:20],
             "retrieved_context": base_context.get("retrieved_context", []),
@@ -151,6 +166,7 @@ class AgentRuntime:
             task=task,
         )
         repository_summary = repository_context.get("repository_summary", "")
+        environment_strategy = self._build_environment_strategy_section(repository_context)
         key_files_section = build_key_files_section(repository_context)
         retrieved_section = build_retrieved_context_section(repository_context)
         preview_section = build_critical_previews_section(repository_context)
@@ -182,7 +198,10 @@ class AgentRuntime:
                     "11) Never repeat actions that already appear as completed Observations in the ReAct trace. "
                     "    If all setup steps succeeded, move to the next unmet objective or mark the task complete. "
                     "12) If latest_replan_failure_message is provided, treat it as the operator-selected failure context "
-                    "    that should drive the next recovery action.",
+                    "    that should drive the next recovery action. "
+                    "13) Treat EnvironmentStrategy as a high-priority execution constraint. "
+                    "    If the user explicitly requested conda, docker, venv, poetry, pipenv, or uv, follow that preference unless it is impossible. "
+                    "14) Do not silently replace a user-requested conda workflow with pip when the repository provides conda signals.",
                 ),
                 (
                     "human",
@@ -191,6 +210,7 @@ class AgentRuntime:
                     "ReAct trace (Thought / Action / Observation history):\n{react_trace}\n\n"
                     "Recent dialog context:\n{dialog_context}\n\n"
                     "RepositorySummary:\n{repository_summary}\n\n"
+                    "EnvironmentStrategy:\n{environment_strategy}\n\n"
                     "KeyFiles:\n{key_files}\n\n"
                     "RetrievedContext:\n{retrieved_context}\n\n"
                     "CriticalFilePreviews:\n{critical_file_previews}\n\n"
@@ -210,6 +230,7 @@ class AgentRuntime:
                     react_trace=react_trace,
                     dialog_context=context_preview,
                     repository_summary=repository_summary,
+                    environment_strategy=environment_strategy,
                     key_files=key_files_section,
                     retrieved_context=retrieved_section,
                     critical_file_previews=preview_section,
@@ -280,7 +301,20 @@ class AgentRuntime:
             install_command = repository_context["install_command"]
             test_command = repository_context["test_command"]
 
-            if any(token in lowered for token in ["install", "setup", "environment", "dependencies"]) and "Install dependencies" not in executed_titles:
+            if any(
+                token in lowered
+                for token in [
+                    "install",
+                    "setup",
+                    "environment",
+                    "dependencies",
+                    "conda",
+                    "poetry",
+                    "pipenv",
+                    "venv",
+                    "uv",
+                ]
+            ) and "Install dependencies" not in executed_titles:
                 steps.append(
                     ExecutionStepModel(
                         title="Install dependencies",
@@ -306,7 +340,7 @@ class AgentRuntime:
                         title="Run containerized validation command",
                         kind="docker",
                         image="python:3.10-slim"
-                        if repository_context["stack"] == "python"
+                        if repository_context.get("runtime_focus") == "python"
                         else "node:20-alpine",
                         command=test_command,
                         success_criteria="The command executes successfully inside the container.",
@@ -595,6 +629,262 @@ class AgentRuntime:
             return re.split(r"\s+", command.strip(), maxsplit=1)[0] or None
         except Exception:
             return None
+
+    def _build_repository_signal_text(self, base_context: dict[str, Any]) -> str:
+        parts = [str(base_context.get("repository_summary") or "")]
+        for collection_name in ("retrieved_context", "critical_file_previews"):
+            for item in base_context.get(collection_name, []):
+                if isinstance(item, dict):
+                    parts.append(str(item.get("source") or ""))
+                    parts.append(str(item.get("content") or ""))
+        return "\n".join(part for part in parts if part).lower()
+
+    def _detect_environment_strategy(
+        self,
+        *,
+        user_message: str,
+        lower_paths: list[str],
+        lower_filenames: set[str],
+        context_text: str,
+        stack: str,
+    ) -> dict[str, Any]:
+        user_preference = self._detect_user_environment_preference(user_message)
+        environment_file = self._pick_first_matching_path(
+            lower_paths,
+            suffixes=("environment.yml", "environment.yaml", "pipfile", "poetry.lock", "uv.lock", "requirements.txt"),
+        )
+        environment_name = self._extract_environment_name(context_text)
+        runtime_focus = self._infer_runtime_focus(
+            user_message=user_message,
+            stack=stack,
+            environment_preference=user_preference,
+        )
+
+        if user_preference == "conda":
+            return self._build_environment_strategy_payload(
+                environment_manager="conda",
+                environment_reason="user_requested_conda",
+                environment_name=environment_name,
+                environment_file=environment_file
+                if environment_file and environment_file.endswith(("environment.yml", "environment.yaml"))
+                else self._pick_first_matching_path(lower_paths, suffixes=("environment.yml", "environment.yaml")),
+                runtime_focus=runtime_focus,
+                lower_paths=lower_paths,
+            )
+        if user_preference in {"venv", "pip", "poetry", "pipenv", "uv"}:
+            return self._build_environment_strategy_payload(
+                environment_manager=user_preference,
+                environment_reason=f"user_requested_{user_preference}",
+                environment_name=environment_name,
+                environment_file=environment_file,
+                runtime_focus=runtime_focus,
+                lower_paths=lower_paths,
+            )
+
+        if self._has_path_suffix(lower_paths, ("environment.yml", "environment.yaml")) or "conda" in context_text:
+            return self._build_environment_strategy_payload(
+                environment_manager="conda",
+                environment_reason="repository_conda_signals",
+                environment_name=environment_name,
+                environment_file=self._pick_first_matching_path(lower_paths, suffixes=("environment.yml", "environment.yaml")),
+                runtime_focus=runtime_focus,
+                lower_paths=lower_paths,
+            )
+        if "poetry.lock" in lower_filenames or "[tool.poetry]" in context_text:
+            return self._build_environment_strategy_payload(
+                environment_manager="poetry",
+                environment_reason="repository_poetry_signals",
+                environment_name=environment_name,
+                environment_file=self._pick_first_matching_path(lower_paths, suffixes=("pyproject.toml", "poetry.lock")),
+                runtime_focus=runtime_focus,
+                lower_paths=lower_paths,
+            )
+        if "pipfile" in lower_filenames:
+            return self._build_environment_strategy_payload(
+                environment_manager="pipenv",
+                environment_reason="repository_pipenv_signals",
+                environment_name=environment_name,
+                environment_file=self._pick_first_matching_path(lower_paths, suffixes=("pipfile",)),
+                runtime_focus=runtime_focus,
+                lower_paths=lower_paths,
+            )
+        if "uv.lock" in lower_filenames or re.search(r"\buv\b", context_text):
+            return self._build_environment_strategy_payload(
+                environment_manager="uv",
+                environment_reason="repository_uv_signals",
+                environment_name=environment_name,
+                environment_file=self._pick_first_matching_path(lower_paths, suffixes=("uv.lock", "pyproject.toml")),
+                runtime_focus=runtime_focus,
+                lower_paths=lower_paths,
+            )
+        if "requirements.txt" in lower_filenames or runtime_focus == "python":
+            return self._build_environment_strategy_payload(
+                environment_manager="pip",
+                environment_reason="repository_python_defaults",
+                environment_name=environment_name,
+                environment_file=self._pick_first_matching_path(lower_paths, suffixes=("requirements.txt",)),
+                runtime_focus=runtime_focus,
+                lower_paths=lower_paths,
+            )
+        if stack in {"node", "polyglot"}:
+            return self._build_environment_strategy_payload(
+                environment_manager="npm",
+                environment_reason="repository_node_defaults",
+                environment_name=environment_name,
+                environment_file=self._pick_first_matching_path(lower_paths, suffixes=("package.json",)),
+                runtime_focus="node",
+                lower_paths=lower_paths,
+            )
+        return self._build_environment_strategy_payload(
+            environment_manager="generic",
+            environment_reason="no_specific_environment_signals",
+            environment_name=environment_name,
+            environment_file=environment_file,
+            runtime_focus=runtime_focus,
+            lower_paths=lower_paths,
+        )
+
+    def _build_environment_strategy_payload(
+        self,
+        *,
+        environment_manager: str,
+        environment_reason: str,
+        environment_name: str | None,
+        environment_file: str | None,
+        runtime_focus: str,
+        lower_paths: list[str],
+    ) -> dict[str, Any]:
+        install_command = "echo 'Inspect environment setup before installing dependencies.'"
+        test_command = "pytest" if runtime_focus == "python" else "npm test" if runtime_focus == "node" else "pytest"
+
+        if environment_manager == "conda":
+            setup_script = self._pick_first_matching_path(lower_paths, suffixes=("scripts/setup-conda.sh",))
+            if setup_script:
+                install_command = f'./{setup_script}'
+            elif environment_file:
+                install_command = f'conda env create -f "{environment_file}"'
+            else:
+                install_command = "conda env list"
+            if runtime_focus == "python":
+                test_command = (
+                    f'conda run -n {environment_name} pytest'
+                    if environment_name
+                    else "pytest"
+                )
+        elif environment_manager == "poetry":
+            install_command = "poetry install"
+            test_command = "poetry run pytest" if runtime_focus == "python" else "poetry run npm test"
+        elif environment_manager == "pipenv":
+            install_command = "pipenv install"
+            test_command = "pipenv run pytest" if runtime_focus == "python" else "pipenv run npm test"
+        elif environment_manager == "uv":
+            install_command = "uv sync"
+            test_command = "uv run pytest" if runtime_focus == "python" else "uv run npm test"
+        elif environment_manager == "venv":
+            install_command = "python -m venv .venv"
+            test_command = "pytest"
+        elif environment_manager == "pip":
+            install_command = "pip install -r requirements.txt"
+            test_command = "pytest"
+        elif environment_manager == "npm":
+            install_command = "npm install"
+            test_command = "npm test"
+
+        return {
+            "environment_manager": environment_manager,
+            "environment_reason": environment_reason,
+            "environment_name": environment_name,
+            "environment_file": environment_file,
+            "runtime_focus": runtime_focus,
+            "install_command": install_command,
+            "test_command": test_command,
+        }
+
+    def _infer_runtime_focus(self, *, user_message: str, stack: str, environment_preference: str | None) -> str:
+        lowered = user_message.lower()
+        python_tokens = {
+            "python",
+            "conda",
+            "pip",
+            "pytest",
+            "train",
+            "model",
+            "database",
+            "backend",
+            "celery",
+            "fastapi",
+        }
+        node_tokens = {
+            "node",
+            "npm",
+            "frontend",
+            "next.js",
+            "react",
+            "typescript",
+            "tailwind",
+            "eslint",
+            "web",
+        }
+        python_score = sum(token in lowered for token in python_tokens)
+        node_score = sum(token in lowered for token in node_tokens)
+
+        if environment_preference in {"conda", "venv", "pip", "poetry", "pipenv", "uv"}:
+            return "python"
+        if environment_preference == "npm":
+            return "node"
+        if python_score > node_score:
+            return "python"
+        if node_score > python_score:
+            return "node"
+        if stack == "polyglot":
+            return "python"
+        return stack
+
+    def _detect_user_environment_preference(self, user_message: str) -> str | None:
+        lowered = user_message.lower()
+        if "conda" in lowered:
+            return "conda"
+        if "poetry" in lowered:
+            return "poetry"
+        if "pipenv" in lowered:
+            return "pipenv"
+        if re.search(r"\buv\b", lowered):
+            return "uv"
+        if "venv" in lowered or "virtualenv" in lowered:
+            return "venv"
+        if "pip " in lowered or lowered.endswith("pip"):
+            return "pip"
+        if "npm" in lowered or "node" in lowered:
+            return "npm"
+        return None
+
+    def _build_environment_strategy_section(self, repository_context: dict[str, Any]) -> str:
+        return "\n".join(
+            [
+                f"- runtime_focus: {repository_context.get('runtime_focus', 'generic')}",
+                f"- environment_manager: {repository_context.get('environment_manager', 'generic')}",
+                f"- environment_reason: {repository_context.get('environment_reason', 'unknown')}",
+                f"- environment_name: {repository_context.get('environment_name') or 'unknown'}",
+                f"- environment_file: {repository_context.get('environment_file') or 'none'}",
+                f"- install_command: {repository_context.get('install_command') or 'none'}",
+                f"- test_command: {repository_context.get('test_command') or 'none'}",
+            ]
+        )
+
+    def _pick_first_matching_path(self, lower_paths: list[str], *, suffixes: tuple[str, ...]) -> str | None:
+        for path in lower_paths:
+            if path.endswith(suffixes):
+                return path.lstrip("./")
+        return None
+
+    def _has_path_suffix(self, lower_paths: list[str], suffixes: tuple[str, ...]) -> bool:
+        return self._pick_first_matching_path(lower_paths, suffixes=suffixes) is not None
+
+    def _extract_environment_name(self, context_text: str) -> str | None:
+        match = re.search(r"(?m)^name:\s*([A-Za-z0-9_.-]+)\s*$", context_text)
+        if match:
+            return match.group(1)
+        return None
 
     def _build_summary_result_digest(self, results: list[dict[str, Any]]) -> dict[str, Any]:
         return {
